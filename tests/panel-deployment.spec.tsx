@@ -92,7 +92,7 @@ it('renders the Deployment page with the derived accounts in the Plugin Manager,
   expect(text()).toContain(zh.hostNotRunning)
 })
 
-it('tells a dsh-superagent that is starting from a browser that cannot write on the Deployment page', async () => {
+it('distinguishes an unserved entry from a served read-only form on the Deployment page', async () => {
   const { form: shared, publish } = fakeForm()
   server.form = shared
   at({ page: 'settings', query: { group: 'deployment' } })
@@ -105,8 +105,9 @@ it('tells a dsh-superagent that is starting from a browser that cannot write on 
   expect(limit().disabled).toBe(true)
   await act(async () => { publish({ status: 'ready' }) })
   expect(limit().disabled).toBe(false)
-  await act(async () => { publish({ mode: 'memory', status: 'unavailable', writable: false }) })
+  await act(async () => { publish({ status: 'ready', writable: false }) })
   expect(text()).toContain(zh.deploymentReadOnly)
+  expect(limit().disabled).toBe(true)
 })
 
 it('reads the state every second after a setup check, until dsh-superagent stopped answering and answers again', async () => {

@@ -32,7 +32,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 
 ## Development
 
-`pnpm check` runs the typecheck, the tests and the build.
+Targets DeepSeek Harness `0.2.2-rc.3` with Node.js `24.9+`. `pnpm check` runs the typecheck, the tests and the build.
 
 ## License
 

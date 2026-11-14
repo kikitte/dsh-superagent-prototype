@@ -49,7 +49,7 @@ export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-super
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /** DSH's agent preset registry selected `agentPreset` for a Session. */
-    'agent-preset/selected'(sessionId: string, agentPreset: string): void
+    'agent-preset/selected'(sessionId: SessionId, agentPreset: string): void
   }
 }
 /**

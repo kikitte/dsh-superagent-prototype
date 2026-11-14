@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { z } from 'zod'
-import { registerHttp } from '../src/app/http.ts'
+import { registerHttp, sameOrigin } from '../src/app/http.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
@@ -76,6 +76,8 @@ it('answers only a same-origin request from the panel on the loopback address', 
       body: { error: 'Same-origin management request required' } })
   }
   expect(await post({ host: 'localhost:3082', origin: 'http://localhost:3082' })).toMatchObject({ status: 200 })
+  // Socket-based or not-yet-listening servers have no TCP port: fail closed.
+  expect(sameOrigin({ headers: { host: '127.0.0.1:undefined', 'x-orchestrator-request': '1' } }, undefined)).toBe(false)
   // Management routes require a loopback Web server.
   expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
 })

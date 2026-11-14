@@ -50,6 +50,8 @@ it('closes the dialog on Escape and returns focus to the opener', async () => {
   opener.focus()
   await act(async () => { opener.click() })
   expect(document.activeElement?.getAttribute('role')).toBe('dialog')
+  // Body-portaled dialogs must exclude their visible box from macOS Desktop header drag regions.
+  expect(document.querySelector('[role="dialog"]')?.hasAttribute('data-window-drag-exclude')).toBe(true)
   await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })) })
   expect(document.querySelector('[role="dialog"]')).toBeNull()
   expect(document.activeElement).toBe(opener)

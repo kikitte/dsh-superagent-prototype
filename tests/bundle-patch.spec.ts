@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { ROUTER_PRESET, WORKER_PRESET } from '../src/app/sessions.ts'
 
-interface Row { id?: string; name: string; disabled?: unknown; config?: Record<string, unknown> & { plugins?: Row[] } | Row[] }
+interface Row { id?: string; name: string; group?: boolean; isolate?: Record<string, boolean>; disabled?: unknown;
+  config?: Record<string, unknown> & { plugins?: Row[] } | Row[] }
 /** The patch as DSH reads it: Cordis's include plugin parses `!!js` scalars, and applies the inserts to an entry list. */
 async function patched(): Promise<Row[]> {
   const cordis = createRequire(createRequire(import.meta.url).resolve('@deepseek-ai/cordis/package.json'))
@@ -40,7 +41,14 @@ it('defines the worker preset Executor Sessions run under, with a shell that mov
   expect(named('@deepseek-ai/dsh-tool-web')).toEqual([expect.objectContaining({ fetch: false })])
   // Spawned subagents run under standard, whose shell moves a command to the background only after 60 s; forked ones, which would run under
   // this preset, are left out.
-  expect(named('@deepseek-ai/dsh-tool-subagent')).toEqual([expect.objectContaining({ provider: 'spawn', agentPreset: 'standard' })])
+  expect(named('@deepseek-ai/dsh-tool-subagent')).toEqual([{
+    provider: 'spawn', toolName: 'subagent', modelSelection: true, modelDiscovery: true, agentPreset: 'standard',
+  }])
+  // Keep interruption despite the current standard preset's opt-out, plus messaging, listing and inbox waiting.
+  expect(named('@deepseek-ai/dsh-tool-subagent-control')).toEqual([{ interrupt: true }])
+  // One main control entry owns these tools; retired subpath plugins must not be mounted.
+  expect(plugins.filter(row => row.name.startsWith('@deepseek-ai/dsh-tool-subagent'))
+    .map(row => row.name)).toEqual(['@deepseek-ai/dsh-tool-subagent-control', '@deepseek-ai/dsh-tool-subagent'])
   // What a worker needs, and none of what asks a person, presents, plans, changes the profile, schedules, sets goals or runs workflows.
   for (const name of ['@deepseek-ai/dsh-tool-fs', '@deepseek-ai/dsh-tool-fs-search', '@deepseek-ai/dsh-tool-bash', '@deepseek-ai/dsh-tool-skill',
     '@deepseek-ai/dsh-tool-todo', '@deepseek-ai/dsh-tool-subagent', '@deepseek-ai/dsh-tool-subagent-control', '@deepseek-ai/dsh-compaction-basic',
@@ -49,6 +57,20 @@ it('defines the worker preset Executor Sessions run under, with a shell that mov
   for (const name of ['@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present', '@deepseek-ai/dsh-plan-mode', '@deepseek-ai/dsh-plugin-manager/tools',
     '@deepseek-ai/dsh-plugin-market/tools', '@deepseek-ai/dsh-tool-schedule', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-command-goal',
     '@deepseek-ai/dsh-tool-workflow', '@deepseek-ai/dsh-workflow-ptc']) expect(names).not.toContain(name)
+})
+
+it('keeps each 5-second shell provider and its consumers in one isolated, platform-gated group', async () => {
+  const rows = await patched()
+  for (const id of [WORKER_PRESET, ROUTER_PRESET]) {
+    const shell = presetOf(rows, id).plugins.find(row => row.id === 'shell')!
+    expect(shell).toMatchObject({ name: 'cordis:group', group: true, isolate: { shell: true } })
+    const plugins = shell.config as Row[]
+    expect(plugins.map(row => row.name)).toEqual(['@deepseek-ai/dsh-bash-sandbox', '@deepseek-ai/dsh-pwsh-sandbox',
+      '@deepseek-ai/dsh-tool-bash', '@deepseek-ai/dsh-tool-pwsh'])
+    for (const row of plugins) {
+      expect(row.disabled).toEqual({ __jsExpr: `process.platform ${row.name.includes('pwsh') ? '!==' : '==='} 'win32'` })
+    }
+  }
 })
 
 it('defines the router preset the main Session runs under: the worker\'s 5-second shell and job waits, and only the tools it uses', async () => {
@@ -64,7 +86,7 @@ it('defines the router preset the main Session runs under: the worker\'s 5-secon
   for (const name of ['@deepseek-ai/dsh-tool-skill', '@deepseek-ai/dsh-skill-filesystem', '@deepseek-ai/dsh-tool-bash', '@deepseek-ai/dsh-tool-jobs',
     '@deepseek-ai/dsh-agent-instructions', '@deepseek-ai/dsh-time-context', '@deepseek-ai/dsh-compaction-basic',
     '@deepseek-ai/dsh-compaction-tool-result-pruner']) expect(named(plugins, name).length, name).toBeGreaterThan(0)
-  expect(named(plugins, '@deepseek-ai/dsh-tool-fs')).toEqual([{ write: false, edit: false }])
+  expect(named(plugins, '@deepseek-ai/dsh-tool-fs')).toEqual([{ write: false, edit: false, applyPatch: false }])
   const names = plugins.map(row => row.name)
   for (const name of ['@deepseek-ai/dsh-tool-subagent', '@deepseek-ai/dsh-tool-subagent-control', '@deepseek-ai/dsh-tool-web', '@deepseek-ai/dsh-tool-fs-search',
     '@deepseek-ai/dsh-tool-todo', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present', '@deepseek-ai/dsh-plan-mode',

@@ -101,6 +101,9 @@
             config:
               - id: tool-subagent-control
                 name: '@deepseek-ai/dsh-tool-subagent-control'
+                config:
+                  # Preserve the worker's controls; standard now disables interruption.
+                  interrupt: true
               - id: tool-subagent
                 name: '@deepseek-ai/dsh-tool-subagent'
                 config:
@@ -165,6 +168,7 @@
             config:
               write: false
               edit: false
+              applyPatch: false
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
             config:

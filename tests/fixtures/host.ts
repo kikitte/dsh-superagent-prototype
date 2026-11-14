@@ -30,7 +30,7 @@ export function feishu(id: string, text: string, overrides: Record<string, unkno
 
 type RegisteredTool = { name: string; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
 type FakeAgent = {
-  id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[] }
+  id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[]; clear?: Mock }
   cancel: Mock; inject: Mock<(message: UserMessage) => void>; steer: Mock<(message: UserMessage) => void>; followup: Mock<(message: UserMessage) => void>
 }
 /** A text message, as DSH's job tools and subagents send their notices. */
@@ -86,14 +86,17 @@ export function jobRegistry(owner: (sessionId: string) => FakeAgent | undefined 
 }
 
 /**
- * DSH's subagents as the Executor uses them. `spawn` starts a child of a Session, an agent while it lives, which a drain of
- * the Session's descendants refuses from then on; `settle` ends one, whose end wakes its idle parent or steers a running one
- * before a wait for the parent's children returns. Releasing or interrupting a child settles it; a drain of descendants
- * injects their ends. The catalog lists every child a Session had.
+ * Current DSH tree API, deliberately without the removed child service methods. Interrupt preserves pending local input;
+ * clearing it on the exact Agent permits settlement. Drain permanently closes admission for that root. Catalog discovery
+ * traverses offline creation parents too; work waits cover all descendants, not merely direct children.
  */
 export function subagentRuntime(agents: Map<string, FakeAgent>) {
   const children = new Map<string, { parent: string; live: boolean; settled: PromiseWithResolvers<void> }>()
   const closed = new Set<string>()
+  const descendants = (parent: string): { id: string; parentId: string; depth: number }[] => [...children]
+    .filter(([, child]) => child.parent === parent).flatMap(([id]) => [
+      { id, parentId: parent, depth: 1 }, ...descendants(id).map(child => ({ ...child, depth: child.depth + 1 })),
+    ])
   const settle = (id: string, wake = true) => {
     const child = children.get(id)
     if (!child?.live) return
@@ -106,26 +109,46 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
     child.settled.resolve()
   }
   const service = {
-    waitForChildren: vi.fn(async (parent: { id: string }) => {
-      const live = [...children.values()].filter(child => child.parent === parent.id && child.live)
-      await Promise.all(live.map(child => child.settled.promise))
-      return live.length > 0
+    waitForTreeWork: vi.fn(async (root: { id: string }) => {
+      let joined = false
+      for (;;) {
+        const live = descendants(root.id).filter(({ id }) => children.get(id)!.live && agents.get(id)?.status !== 'idle')
+          .map(({ id }) => children.get(id)!)
+        if (!live.length) return joined
+        joined = true
+        await Promise.all(live.map(child => child.settled.promise))
+      }
     }),
-    listChildren: vi.fn(async (id: string) => [...children].filter(([, child]) => child.parent === id).map(([childId]) => ({ id: childId }))),
-    drainChildren: vi.fn(async (_parent: { id: string }, ids: readonly string[]) => { for (const id of ids) settle(id) }),
+    listDescendants: vi.fn(async (id: string) => descendants(id).map(child => ({ ...child, kind: 'child' as const, mode: 'continuable' as const,
+      activity: agents.has(child.id) ? 'running' as const : 'inactive' as const, hasChildren: descendants(child.id).length > 0 }))),
     drainDescendants: vi.fn(async (parents: readonly { id: string }[]) => {
       for (const parent of parents) {
         closed.add(parent.id)
-        for (const [id, child] of children) if (child.parent === parent.id) settle(id, false)
+        for (const { id } of descendants(parent.id).reverse()) settle(id, false)
       }
     }),
-    interrupt: vi.fn((id: string) => { settle(id) }),
+    interrupt: vi.fn((id: string, _authority: { kind: 'ancestor'; agent: { id: string } }) => {
+      agents.get(id)?.cancel({ kind: 'parent' }, { keepInbox: true })
+    }),
   }
   const spawn = (parent: string) => {
     if (closed.has(parent)) throw new Error('DRAINING: the Session admits no new subagents')
     const id = `child-${children.size + 1}`
     children.set(id, { parent, live: true, settled: Promise.withResolvers<void>() })
-    agents.set(id, { id, status: 'running', session: { header: { parentSession: parent } } } as never)
+    const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[], clear: vi.fn(() => {
+      inbox.nextTurn.length = 0; inbox.nextStep.length = 0
+      if (child.status === 'idle') settle(id)
+    }) }
+    const child = { id, ctx: new Context(), status: 'running', inbox, session: { header: { parentSession: parent } },
+      inject: vi.fn(), followup: vi.fn(), steer: vi.fn(),
+      cancel: vi.fn((_cause: unknown, options?: { keepInbox?: boolean }) => {
+        if (child.status === 'idle') return
+        child.status = 'idle'
+        if (!options?.keepInbox) inbox.clear()
+        if (!inbox.nextTurn.length && !inbox.nextStep.length) settle(id)
+      }),
+    }
+    agents.set(id, child)
     return id
   }
   return { service, settle, spawn, live: (id: string) => !!children.get(id)?.live }
@@ -231,15 +254,15 @@ export async function startRuntime(seed?: (store: Store) => void) {
     }),
     selectModel: vi.fn(async () => {}), resolveAgent: vi.fn(resolveDefault), rename: vi.fn(async () => {}),
     prompt: vi.fn(() => { throw new Error('Plugin delivery must not use user RPC') }),
-    inspect: vi.fn(async () => ({ events: [] })),
   }
+  const query = { readSession: vi.fn(async (_id: string) => ({ events: [] })) }
   const reader = { read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} }
   const persistence = { flush: vi.fn(async () => {}), open: vi.fn(async () => reader) }
   const webServer = { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }
   const jobs = jobRegistry(id => agents.get(id))
   const subagents = subagentRuntime(agents)
   const services = { agents, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
-    sessionPersistence: persistence, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer,
+    sessionQuery: query, sessionPersistence: persistence, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer,
     jobs: jobs.service, subagents: subagents.service }
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
@@ -294,6 +317,6 @@ export async function startRuntime(seed?: (store: Store) => void) {
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
   return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
-    jobs, subagents, step, claim }
+    jobs, subagents, query, step, claim }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

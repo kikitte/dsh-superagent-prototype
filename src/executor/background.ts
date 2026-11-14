@@ -5,6 +5,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 
 /** What the Executor uses of DSH's job registry: the jobs a Session can see, their events, a wait for one and a kill. */
 interface Jobs {
@@ -13,12 +14,8 @@ interface Jobs {
   kill(id: string, caller: string, reason?: string): unknown
   readonly events: { subscribe(filter: { owner: string }, listener: (event: { type: string }) => void): () => void }
 }
-/** What the Executor uses of DSH's subagents: joining a worker's subagents that work, its subagents, and releasing them. */
-interface Subagents {
-  waitForChildren(parent: Agent): Promise<boolean>
-  listChildren(parentSessionId: string): Promise<readonly { id: string }[]>
-  drainChildren(parent: Agent, childIds: readonly string[]): Promise<void>
-}
+/** Use the installed service declarations, rather than a cast that can hide removed service methods. */
+type Subagents = Pick<SubagentRuntime, 'waitForTreeWork' | 'listDescendants' | 'interrupt'>
 /** How long a stop waits for a killed job to end, collecting its end so the worker is not woken to hear of it. */
 const KILL_WAIT_MS = 10_000
 /** How long a release of subagents may take; it can hold up a shutdown, so DSH's own callers bound it too. */
@@ -27,7 +24,7 @@ const DRAIN_LIMIT_MS = 10_000
 const COLLECT_WAIT_MS = 10 * 60_000
 
 const registry = (ctx: Context): Jobs | undefined => ctx.get('jobs') as Jobs | undefined
-const subagentsOf = (ctx: Context): Subagents | undefined => ctx.get('subagents') as Subagents | undefined
+const subagentsOf = (ctx: Context): Subagents | undefined => ctx.get('subagents')
 const running = (status: string) => status === 'running' || status === 'stopping'
 /** The jobs the Session owns that run, but those in `except`, such as the ones left to a person. */
 const owned = (jobs: Jobs, sessionId: string, except?: ReadonlySet<string>) =>
@@ -49,7 +46,7 @@ const joins = new WeakMap<Agent, Promise<boolean>>()
 function childrenEnd(subagents: Subagents, agent: Agent): Promise<boolean> {
   let join = joins.get(agent)
   if (!join) {
-    join = subagents.waitForChildren(agent).finally(() => { joins.delete(agent) })
+    join = subagents.waitForTreeWork(agent).finally(() => { joins.delete(agent) })
     joins.set(agent, join)
   }
   return join
@@ -133,19 +130,45 @@ export async function collectJob(ctx: Context, sessionId: string, job: { id: str
   return undefined
 }
 
+/** Exact local Agents retiring after a stop; their scoped listeners live until their Activation is disposed. */
+const retiring = new WeakSet<Agent>()
+function retire(child: Agent): void {
+  if (retiring.has(child)) return
+  retiring.add(child)
+  // A late completion notice can wake an interrupted parent during asynchronous descendant cleanup. Clear input even
+  // while idle/aborting, and cancel each new driver synchronously at its running boundary, before it can execute work.
+  // Keep these guards past the bounded join: only this captured Agent retires, never a later same-id Activation.
+  child.ctx.on('agent/inbox/inserted', ({ agent }) => { if (agent === child) child.cancel({ kind: 'parent' }) })
+  child.ctx.on('agent/status', ({ agent, status }) => { if (agent === child && status === 'running') child.cancel({ kind: 'parent' }) })
+}
+
 /**
- * Release the worker's live subagents, for a bounded time. DSH delivers each one's end to the worker before the release
- * returns, which wakes it, so the worker's turn is cancelled after, keeping its inbox when `keepInbox`, and the stop ends
- * with that turn. Its Session still admits subagents.
+ * Interrupt the worker's discovered descendants and join their work for a bounded time. Retire exact captured local Agents
+ * through their remaining lifetime: interrupt alone preserves input, and a single clear cannot prevent late notices from
+ * restarting a descendant outside the worker's slot. Joining includes cleanup and completion notices, so cancel the worker's
+ * resulting turn after, keeping its inbox when requested.
+ * Never drainDescendants here: its admission cutoff lasts until the root is disposed, including later ticket turns.
+ * Unlike retained Activation.dispose(), discovery cannot revoke unpublished starts or traverse unreadable catalog branches.
  */
 export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = false): Promise<void> {
   const subagents = subagentsOf(ctx)
   if (!subagents) return
-  // The catalog lists every subagent the Session had; one that ended has no agent.
-  const live = (await subagents.listChildren(agent.id)).map(child => child.id).filter(id => ctx.agents.get(id as SessionId))
+  // Catalog activity is Session residency, not execution status. External children have no Agent; interrupt accepts absent
+  // targets, so include their catalog rows as well. Reverse pre-order interrupts grandchildren before their creators.
+  const live = (await subagents.listDescendants(agent.id)).map(row => ({ row, child: ctx.agents.get(row.id) }))
+    .filter(({ row, child }) => child || row.kind === 'child' && row.mode === 'external').reverse()
   if (!live.length) return
-  try { await until(subagents.drainChildren(agent, live), undefined, DRAIN_LIMIT_MS) }
-  finally {
+  const failures: unknown[] = []
+  try {
+    // Install every guard before issuing any interrupt: even synchronous settlement can notify another captured child.
+    for (const { child } of live) if (child) retire(child)
+    for (const { row, child } of live) try {
+      subagents.interrupt(row.id, { kind: 'ancestor', agent })
+      child?.inbox.clear()
+    } catch (error) { failures.push(error) }
+    await until(childrenEnd(subagents, agent), undefined, DRAIN_LIMIT_MS)
+    if (failures.length) throw new AggregateError(failures, `Interrupting the subagents of ${agent.id} failed`)
+  } finally {
     if (agent.status !== 'idle') cancelled.add(agent)
     agent.cancel({ kind: 'user' }, { keepInbox })
     await until(agent.whenIdle(), undefined, DRAIN_LIMIT_MS)
