@@ -7,10 +7,10 @@ import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ConfigPageForm } from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import { LIMITS } from '../limits.ts'
 import type { SetupView } from './api.ts'
-import { InfoTip, Input } from './controls.tsx'
+import { Button, InfoTip, Input, Switch } from './controls.tsx'
 import { SaveBar, useDraft } from './draft.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
-import { Field, Fields } from './settings-kit.tsx'
+import { Field, Fields, SettingsProvider, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { setupText, type T } from './text.ts'
 import { CheckSetupButton, Hint, KeyValues, Section, SetupMessage } from './widgets.tsx'
 
@@ -55,7 +55,7 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
   </Field>
   const feishu = accounts?.feishu ? accounts.feishu.name || accounts.feishu.botId
     : setup.feishuProblem ? setupText(t, setup.feishuProblem) : t('deploymentFeishuNone')
-  return <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
+  return <div className="dt-form"><SettingsProvider><GitHubIntegration setup={setup} /></SettingsProvider><form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
     <Fields disabled={draft.busy}>
       <Hint>{t('deploymentIntro')}</Hint>
       {setup.problem && <div className="dt-row-buttons">
@@ -63,7 +63,7 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
       </div>}
       {showAccounts && <Section title={t('deploymentDerived')} hint={t('deploymentDerivedHint')}>
         <KeyValues rows={[[t('deploymentRepository'), accounts?.repository ?? '—'],
-          [t('deploymentAgent'), accounts ? `@${accounts.agent}` : '—'], [t('deploymentFeishu'), feishu]]} />
+          [t('deploymentAgent'), accounts?.agent ? `@${accounts.agent}` : '—'], [t('deploymentFeishu'), feishu]]} />
         <Hint>{t('deploymentAccountsWhere')}</Hint>
       </Section>}
       <Section title={t('deploymentMachine')}>
@@ -80,7 +80,7 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
       </Section>
     </Fields>
     {editable && <SaveBar {...draft} onDiscard={draft.discard} />}
-  </form>
+  </form></div>
 }
 
 /** Plugin Manager config page; includes derived repository and accounts because Source settings live in the main panel. */
@@ -95,4 +95,29 @@ function PluginPage({ form }: { form: DeploymentForm }) {
 /** DSH Plugin Manager config view entry; renders nothing in `summary` mode because DSH displays the package description. */
 export function PluginConfig({ t, view, form }: { t: T; view: 'page' | 'summary'; form: DeploymentForm }) {
   return view === 'page' ? <PanelProvider t={t} interval={10_000}><PluginPage form={form} /></PanelProvider> : null
+}
+
+/** Operator-only GitHub access settings, independent of Source intake and plugin installation. */
+function GitHubIntegration({ setup }: { setup: SetupView }) {
+  const { t } = usePanel()
+  const { running } = usePanelData()
+  const { settings: { integration } } = useSettings()
+  const draft = useBlockDraft('integration:github', integration.value, integration.revision)
+  const edit = (value: Partial<typeof draft.value>) => draft.edit({ ...draft.value, ...value })
+  return <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
+    <Section title={t('githubIntegration')} hint={t('githubIntegrationHint')}>
+      <Fields disabled={draft.busy}>
+        <Field label={t('githubAccess')}><Switch label={t('githubAccess')} checked={draft.value.enabled} onChange={enabled => edit({ enabled })} /></Field>
+        <Field label={t('deploymentRepository')}><Input value={draft.value.repository} onChange={event => edit({ repository: event.target.value })} /></Field>
+        <Field label={t('githubCli')}><Input value={draft.value.cli} onChange={event => edit({ cli: event.target.value })} /></Field>
+        <Hint>{t(`githubStatus.${setup.github.status as 'off' | 'checking' | 'ready' | 'error'}`)}</Hint>
+        {setup.accounts?.agent && !draft.dirty && <Hint>@{setup.accounts.agent} · {setup.accounts.repository}</Hint>}
+        {setup.github.problem && <SetupMessage problem={setup.github.problem} lead />}
+        {integration.notice && <Hint>{t('githubMigrationDraft')}</Hint>}
+        <Hint>{t(!setup.github.adapter ? 'githubAdapterMissing' : setup.github.intake ? 'githubMonitoringOn' : 'githubMonitoringOff')}</Hint>
+        {setup.github.status === 'error' && <CheckSetupButton />}
+      </Fields>
+      <SaveBar {...draft} status={draft.dirty && running > 0 ? t('restartInterrupts', { count: running }) : undefined} onDiscard={draft.discard} />
+    </Section>
+  </form>
 }

@@ -17,7 +17,7 @@ it('saves this machine\'s settings in the Deployment settings through DSH\'s con
   await click(find(zh['settingsGroup.deployment'], '.dt-settings-link'))
   expect(text()).toContain('/srv/dsh-superagent')
   // Accounts are on the Source settings; the Plugin Manager page, where those are not at hand, shows them here.
-  expect(text()).not.toContain('@agent-bot')
+  expect(text()).toContain('@agent-bot')
   for (const moved of ['仓库克隆', '工单 worktree 目录', '禁用的命令']) expect(text()).not.toContain(moved)
   expect(text()).toContain(zh.deploymentIntro)
   // A limit applies at once, so a draft of one says only that it is unsaved, even while Assignments run.
@@ -82,10 +82,10 @@ it('renders the Deployment page with the derived accounts in the Plugin Manager,
   expect(container.textContent).toBe('')
   server.form = fakeForm().form
   await render('page')
-  for (const fact of ['acme/widgets', '@agent-bot', 'Widgets Bot', '账号在 dsh-superagent 面板的来源设置里修改。']) expect(text()).toContain(fact)
+  for (const fact of ['acme/widgets', '@agent-bot', 'Widgets Bot', 'GitHub 访问在部署设置中修改，飞书机器人在来源设置中修改。']) expect(text()).toContain(fact)
   server.setup = { ...server.setup, problem: problemOf('repositoryUnset'), accounts: null }
   await render('page')
-  expect(text()).toContain('部署检查未通过：GitHub 来源没有设置监听的仓库。')
+  expect(text()).toContain('部署检查未通过：GitHub 集成没有设置仓库。')
   expect(field<HTMLInputElement>(zh.deploymentPromptMaxChars).disabled).toBe(false)
   server.down = true
   await render('page')

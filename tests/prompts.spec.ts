@@ -15,7 +15,7 @@ import type { Variable } from '../src/app/execution-environment.ts'
 /** The execution environment outside any ticket, as the runtime passes it once setup has finished. */
 const variables = (): Variable[] => [{ key: 'DSH_SUPERAGENT_GITHUB_REPOSITORY', value: 'acme/widgets', description: { zh: '仓库', en: 'The repository' }, owner: 'github' }]
 const ENVIRONMENT_LINE = '- DSH_SUPERAGENT_GITHUB_REPOSITORY = "acme/widgets": The repository.'
-const promptsOf = (store: Store, maxChars = 100000) => new Prompts(store, () => maxChars, variables, () => true)
+const promptsOf = (store: Store, maxChars = 100000) => new Prompts(store, () => maxChars, variables, () => true, () => true)
 function withStore(body: (store: Store, dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'prompts-')); const store = new Store(join(dir, 'db'))
   try { body(store, dir) } finally { store.close(); rmSync(dir, { recursive: true, force: true }) }
@@ -119,7 +119,7 @@ it('registers the built-in Source skills, Feishu only with a Feishu bot, before 
     expect(skills.map(([name]) => name)).toEqual(['feishu', 'github', 'release'])
     expect(skills[1]![1]).toContain('## CLI usage')
     expect(skills[2]![1]).toBe('Tag releases.')
-    expect(new Prompts(store, () => 100000, variables, () => false).skills(config).map(([name]) => name)).toEqual(['github', 'release'])
+    expect(new Prompts(store, () => 100000, variables, () => false).skills(config).map(([name]) => name)).toEqual(['release'])
   })
 })
 

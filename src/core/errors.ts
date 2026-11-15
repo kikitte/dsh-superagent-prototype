@@ -1,5 +1,7 @@
 /** User-facing error codes mapped to their category ('missing' or 'refused') and English message template. */
 export const USER_ERRORS = {
+  githubAccountsMoved: ['refused', 'GitHub repository and cli belong in integration:github; remove them from source:github'],
+  githubRepositoryRetained: ['refused', 'Cannot change GitHub repository: retained GitHub state ({state}) identifies the old repository. Use a separate state directory for a different repository. Disabling GitHub is still allowed.'],
   unknownTicket: ['missing', 'Unknown ticket'],
   unknownProblem: ['missing', 'Unavailable Eval not found'],
   unknownTrigger: ['missing', 'Unknown trigger'],

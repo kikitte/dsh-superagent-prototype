@@ -21,8 +21,8 @@ it('shows each Source\'s state on the Source status and opens its settings from 
   await click(zh['tab.source'])
   await click(zh.sourceOpenSettings)
   expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
-  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['term.source'])
-  expect(all('.dt-card')[1]!.textContent).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
+  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.deployment'])
+  expect(text()).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
 })
 
 it('folds more than six chats into a line of their names', async () => {
@@ -93,51 +93,33 @@ it('renders each Source\'s settings from its kind\'s fields and saves one Source
   expect(server.revisions['source:github']).toBe(6)
 })
 
-it('shows the account each CLI signs in as, and keeps a saved CLI on screen while dsh-superagent restarts', async () => {
+it('edits GitHub access in Deployment independently of the Source intake switches', async () => {
+  at({ page: 'settings', query: { group: 'deployment' } })
   await mount()
-  await click(tab(zh['tab.settings']))
-  const github = all('.dt-card')[1]!
-  expect(github.textContent).toContain('当前账号 @agent-bot')
-  const labels = () => [...github.querySelectorAll('label')].map(label => label.textContent)
-  expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI'])
-  expect(field<HTMLInputElement>('监听的仓库').value).toBe('acme/widgets')
-  // A fact describes the saved value, so an edited CLI shows none until it is saved.
-  await type(field<HTMLInputElement>('智能体的 GitHub CLI'), 'gh-other')
-  expect(github.textContent).not.toContain('当前账号 @agent-bot')
-  await click(zh.discard)
-  expect(github.textContent).toContain('当前账号 @agent-bot')
-  await click([...github.querySelectorAll<HTMLElement>('[data-disclosure-row]')].find(row => row.textContent?.includes('高级'))!)
-  expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI', '轮询间隔 / 秒', '连续失败几次后报告异常'])
-  expect(all('.dt-card')[0]!.textContent).toContain('当前机器人 Widgets Bot')
-  await type(field<HTMLInputElement>('智能体的 GitHub CLI'), '/opt/bin/gh-agent')
-  expect(github.textContent).toContain(zh.restartInterrupts.replace('{count}', '2'))
-  await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
-  expect(server.settings.sources.github!.config).toMatchObject({ cli: '/opt/bin/gh-agent' })
+  expect(text()).toContain(zh.githubIntegration)
+  expect(field<HTMLInputElement>(zh.deploymentRepository).value).toBe('acme/widgets')
+  await type(field<HTMLInputElement>(zh.githubCli), '/opt/bin/gh-agent')
+  const form = field<HTMLInputElement>(zh.githubCli).form!
+  await act(async () => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
+  expect(server.settings.integrations.github.cli).toBe('/opt/bin/gh-agent')
+  expect(server.settings.sources.github!.config).not.toHaveProperty('cli')
   expect(text()).toContain(zh.savedRestarting)
-  // The saved value stays, and the card's fields are disabled, until the saved revision returns with the restarted dsh-superagent.
-  expect(field<HTMLInputElement>('智能体的 GitHub CLI').value).toBe('/opt/bin/gh-agent')
-  expect(field('智能体的 GitHub CLI').matches(':disabled')).toBe(true)
-  expect(sessionStorage.getItem('dsh-superagent/draft/master/source:github')).toBeNull()
+  expect(field(zh.githubCli).matches(':disabled')).toBe(true)
 })
 
 it('points a setup problem at the settings that fix it', async () => {
   server.setup = { ...server.setup, problem: problemOf('agentCliUnset'), accounts: null }
-  // jsdom has no scrolling; mock scrollIntoView to record which card the link brings into view.
-  const scroll = vi.fn()
-  Element.prototype.scrollIntoView = scroll
   await mount()
-  expect(text()).toContain(zh.problemSetup)
+  expect(text()).toContain(zh.problemSetupGithub)
   expect(text()).toContain(zh['setup.agentCliUnset'])
   // Nothing runs while setup waits, so the Executor says so instead of counting.
   expect(text()).toContain(zh.executorWaitingSetup)
   expect(all('.dt-stat').map(stat => stat.textContent)).not.toContain('执行中2 / 3')
-  expect(text()).toContain('在设置 › 来源的 GitHub 卡片修正后保存，会重新检查')
-  await click(find(zh.problemSetup, 'button, a, [role="button"]'))
+  expect(text()).toContain('在设置 › 部署的 GitHub 集成中修正后保存，会重新检查')
+  await click(find(zh.problemSetupGithub, 'button, a, [role="button"]'))
   expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
-  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['term.source'])
-  expect(all('.dt-card')[1]!.textContent).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
-  expect(scroll.mock.contexts).toContain(all('.dt-card')[1])
-  delete (Element.prototype as Partial<Element>).scrollIntoView
+  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.deployment'])
+  expect(text()).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
   await click(find(zh['settingsGroup.deployment'], '.dt-settings-link'))
   expect(text()).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
   // After a fix outside dsh-superagent, a check runs setup again.
@@ -190,9 +172,9 @@ it('shows the Sources waiting for the deployment check, and the problem on the S
   // The GitHub Source is where the problem is fixed, so it shows the error; Feishu waits.
   expect(rows.map(row => row.querySelector('.dt-status-text')?.textContent)).toEqual(['等待部署检查', '出错'])
   expect(text()).not.toContain('Waiting for setup')
-  expect(rows[1]!.textContent).toContain('部署检查未通过：GitHub 来源没有设置监听的仓库。')
+  expect(rows[1]!.textContent).toContain('部署检查未通过：GitHub 集成没有设置仓库。')
   await click(find(zh.sourceOpenSettings, '.dt-row button'))
-  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['term.source'])
+  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.deployment'])
 })
 
 it('shows a Source\'s health in the interface language, and a diagnostic as reported', async () => {
@@ -268,10 +250,10 @@ it('takes no space for messages that were all sent', async () => {
 it('reads the settings again as soon as dsh-superagent answers after a save restarted it', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   onTestFinished(() => { vi.useRealTimers() })
-  at({ page: 'settings', query: { group: 'source' } })
+  at({ page: 'settings', query: { group: 'deployment' } })
   await mount()
   await type(field<HTMLInputElement>('智能体的 GitHub CLI'), '/opt/bin/gh-agent')
-  const github = all('.dt-card')[1]!
+  const github = field<HTMLInputElement>(zh.githubCli).form!
   await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
   expect(field('智能体的 GitHub CLI').matches(':disabled')).toBe(true)
   // dsh-superagent restarts: DSH answers with empty 404s, then it answers again.

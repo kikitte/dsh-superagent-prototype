@@ -155,7 +155,7 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
 }
 
 /** @param seed - writes to the database before the Runtime opens it, such as records an earlier version stored. */
-export async function startRuntime(seed?: (store: Store) => void) {
+export async function startRuntime(seed?: (store: Store) => void, options: { github?: boolean; processOwner?: boolean; sources?: boolean } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'orchestrator-host-'))
   const AGENT = join(directory, 'agent-gh'), BOT = join(directory, 'lark-bot')
   const repository = { default_branch: 'master', permissions: { push: true } }
@@ -277,21 +277,22 @@ export async function startRuntime(seed?: (store: Store) => void) {
         return owner === `simulated-range:${lease.id}` && !activeJobs && !activeChildren ? 'Simulated external owner verified no fake process activity' : undefined
       },
     } } }
+  if (options.processOwner === false) delete (services as Partial<typeof services>).executionDirectorySafety
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   for (const cli of [AGENT, BOT]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
   const seeded = new Store(join(directory, 'orchestrator.sqlite'))
-  const sources = { github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT } }, feishu: { enabled: true, config: { cli: BOT } } }
-  seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources }))
+  const sources = { github: { enabled: options.github ?? false, config: {} }, feishu: { enabled: true, config: { cli: BOT } } }
+  seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), integrations: { github: { enabled: options.github ?? false, repository: options.github ? 'acme/widgets' : '', cli: options.github ? AGENT : '' } }, sources: options.sources === false ? {} : sources }))
   seed?.(seeded)
   seeded.close()
   const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
   await runtime.ready
-  runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
+  if (options.sources !== false) { runtime.sources.register(feishuKind); runtime.sources.register(githubKind) }
   const settings = runtime.store.settings()
   runtime.store.saveSettings({ ...settings, eval: { ...settings.eval, mode: 'auto' },
     policy: { ...settings.policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } },
-    sources: { ...sources, feishu: { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
+    sources: options.sources === false ? {} : { ...sources, feishu: { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
   deliveries.mockClear()
 
   /** Parsed JSON payloads delivered to `sessionId`. */

@@ -5,10 +5,10 @@ Use this guide to install, configure and operate dsh-superagent. It covers accou
 ## What runs
 
 - **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
-- **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
+- **Optional: an agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
 - **Optional:** a Feishu bot for chat requests.
 
-Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
+Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Deployment for optional GitHub access, Sources for intake and Feishu bot configuration, Policy for allowed lists, and Execution for worker directories and commands.
 
 ### Permissions and isolation
 
@@ -20,9 +20,11 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ## Prerequisites
 
-- Node.js 24.9+, pnpm, git 2.32+, Python 3.8+ and tmux
-- GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
-- A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
+- Base: Node.js 24.9+, pnpm, writable state directory and supported DSH with a configured model. Operational scripts additionally use Python 3.8+, tmux and a shell. Keep DSH's own prerequisites separate from Superagent's checks.
+- Plain-file execution: no Git or GitHub CLI is required by Superagent. A zero-Source installation starts ready and idle; enable a Source to receive requests.
+- Local Git: Git and an explicit author for requested commits (`executor.gitAuthor`), or the suggested identity of a ready GitHub integration.
+- Optional GitHub: Git 2.32+, `gh` 2.48+, a dedicated agent account with push access to one github.com repository. GitHub Enterprise Server is not supported. LFS is needed only for repositories using it.
+- Completed-Ticket execution after reopen and restart recovery, including default directories: a production durable process-owner provider covering hooks and all worker descendants, with independently verified quiescence. This bundle ships no production process-owner provider; these lifecycle checks remain blocked. Fixed inventory also requires authoritative cross-runtime occupancy/admission integration.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
 
@@ -144,7 +146,7 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+1. **Deployment and Sources.** For GitHub, enable access in Deployment and set repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Separately enable its Source for intake and PR observation. Both default off. Feishu-only operators skip GitHub accounts entirely. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** Configure the reserved `default` pool's root and prepare command. It creates one fresh dedicated execution directory at first launch, not an existing-directory inventory; retries and resumption retain the committed directory. To give each Ticket an independent checkout of the repository:
 
@@ -154,7 +156,7 @@ Setup must succeed before polling or work starts. Overview lists missing require
    ```
 
    The default prepare hook runs in the root while the reserved target path is absent. It must create that exact path without clobbering and produce an independent checkout/worktree (as above), or a genuinely non-Git directory. It must not operate on an inherited ancestor checkout. An empty hook exclusively creates an empty directory. A committed target is never silently substituted after a crash or filesystem conflict. List personal CLIs, such as one signed in to your own account, as blocked commands.
-4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
+4. **Prompts.** Set the team scope and delivery requirements for the assigned artifact. Configure local commit identity in Execution. GitHub review/merge rules live in the conditional GitHub skill; custom prompt text is preserved and should be reviewed if it requests unavailable capabilities.
 
 ### Fixed-inventory pools and safety prerequisites
 
@@ -218,30 +220,31 @@ A refusal has a status and `error`, its English text:
 
 The blocks:
 
-- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
+- `integration:github`: `{"enabled": false, "repository": "", "cli": ""}`. Operator-only GitHub access; enabling checks identity/push access. Disabling never probes the saved CLI. Intake can remain off while access is ready.
+- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has polling options and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
-- `executor`: `model`, `maxWorkers`, `directory` (default-pool root), `prepare` (default hook), `blockedCommands`, `defaultPoolDescription`, `placementInstructions`, and `directoryPools`: `[{"id":"frontend","description":"UI implementation","directories":[{"id":"frontend-1","path":"/srv/frontend-1"}],"prepare":"…","recycle":"…"}]`. `default` is synthesized and cannot appear in `directoryPools`. All IDs are stable; directory IDs are unique across pools. CRUD uses revision-aware whole-block `PUT settings/executor`, not partial patches or filesystem operations. Paths, pool membership and executable hooks can only be changed by panel/API saves, not model settings tools. Semantic description/instruction changes publish new placement context versions; inventory, eligibility and worker-slot changes do not. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
+- `executor`: optional operator-only `contextDirectory` (absolute read-only admission baseline) and `gitAuthor` (`{"name":"Local Agent","email":"agent@example.com"}` or null), `model`, `maxWorkers`, `directory` (default-pool root), `prepare` (default hook), `blockedCommands`, `defaultPoolDescription`, `placementInstructions`, and `directoryPools`: `[{"id":"frontend","description":"UI implementation","directories":[{"id":"frontend-1","path":"/srv/frontend-1"}],"prepare":"…","recycle":"…"}]`. `default` is synthesized and cannot appear in `directoryPools`. All IDs are stable; directory IDs are unique across pools. CRUD uses revision-aware whole-block `PUT settings/executor`, not partial patches or filesystem operations. Paths, pool membership and executable hooks can only be changed by panel/API saves, not model settings tools. Semantic description/instruction changes publish new placement context versions; inventory, eligibility and worker-slot changes do not. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 
-Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
+Changing enabled integration credentials runs the corresponding setup check first. Changing repository is refused while old GitHub Triggers, Threads, PR bindings, polling cursors or deliveries remain, including ended/resumable history; use a separate state directory. Disabling the integration preserves saved work and pauses observation; it does not synthesize PR closure or release directories. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
 
 ```sh
 api=http://127.0.0.1:3082/orchestrator/api
-rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github") | .revision')
-curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
-  -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
+rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.integration.revision')
+curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/integration:github \
+  -d "{\"value\": {\"enabled\": true, \"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}, \"revision\": $rev}"
 ```
 
 ## Setup checks
 
 Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
 
-Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source.
+Setup installs the neutral worker environment first as a core requirement. Optional GitHub and Feishu probes are bounded and independent. A failed integration leaves core and the main Session ready, records a specific integration error, and leaves independent work available. Ready GitHub additionally verifies credential routing. Confirmed non-Git directories skip Git subprocesses; markers, ancestor checkouts, unreadable metadata and failed probes remain fail-closed.
 
 The process environment that setup writes:
 
-- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
-- **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
+- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the ready agent CLI or fails with an actionable unavailable error; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
+- **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. When ready it selects the agent CLI as the github.com credential helper; otherwise no GitHub helper is installed. It always rewrites both `git@github.com:` and `ssh://git@github.com/` to HTTPS, preventing fallback to operator SSH credentials, and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. Only an explicit `executor.gitAuthor` supplies local commit identity; git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
 
 A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.
 
@@ -293,3 +296,24 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | The log says the plugin is incompatible with the running dsh | Install a DeepSeek Harness version within the `engines.dsh` range |
 | The panel shows "Failed to load plugins" after a DeepSeek Harness upgrade | Restart the running instance |
 | Nothing happens after a mention | Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. On GitHub, a mention added by editing an Issue's body is not received; mention the agent in a comment |
+
+
+## Minimal and local execution paths
+
+For Feishu-only startup, leave `integration:github.enabled` and `source:github.enabled` false. Enable the Feishu plugin, configure its strict-mode bot CLI and allowlisted conversation, and choose the default pool. For an empty directory leave `executor.prepare` empty: the Executor creates the dedicated directory. File results can be delivered to Feishu without a GitHub URL. For no incoming Sources, leave both off and open the main Session to manage settings.
+
+For local Git work, set `executor.gitAuthor` and optionally `executor.contextDirectory` to an explicit baseline. A prepare command using a local clone can be:
+
+```sh
+git -C /srv/local-clone worktree add -b "agent/$DSH_SUPERAGENT_NAME" "$DSH_SUPERAGENT_DIR" HEAD
+```
+
+This requires no GitHub account. The local context reader rejects traversal and escaping symlinks, limits regular files to 1 MiB and directory snapshots to 2000 entries, and paginates cached text in bounded pages. It never prepares a Ticket for admission. No context directory means ready GitHub context is used, or context is explicitly unavailable; the authorized message alone may still suffice.
+
+For GitHub work, enable access in Deployment, then use the existing checkout prepare command above against your operator-provisioned local GitHub clone. Enable the GitHub Source separately for notifications, CI and merge/close observation. Without that plugin, ready CLI access remains usable, but automatic intake and PR tracking are unavailable.
+
+Neither prepare path bypasses release safety. A first worker turn may run without a process provider, but after managed execution the lease stays quarantined without trusted owner evidence. An idle Session or successful restart is not quiescence proof. Completed-Ticket reopen execution and restart/host-crash recovery are blocked until a production provider is integrated and verified, even in the default pool.
+
+## GitHub optional settings upgrade
+
+Schema 12 transactionally moves legacy Source `repository`/`cli` into revisioned `integration:github`. Complete credentials enable access even when intake was off. Partial credentials remain disabled drafts with a review notice; fresh installations default access and intake off. Explicit new integration fields take precedence. Old snapshots remain audit history and are normalized on read, without reactivating an account. Legacy writes of account fields to `source:github` are rejected with a pointer to `integration:github`. Disablement and account changes use controlled shutdown/restart and rewrite managed helpers and skills; personal CLI files are preserved. Exact old stock scope/delivery defaults become neutral; custom text and built-in overrides are retained. Downgrading requires restoring a pre-upgrade state backup; an older runtime must not open schema 12.

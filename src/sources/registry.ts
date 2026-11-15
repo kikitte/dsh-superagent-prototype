@@ -1,4 +1,5 @@
 /** Registry of installed Source kinds, their configured instances, and the Engine's SourceScope implementation. */
+import { UserError } from '../core/errors.ts'
 import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
@@ -54,6 +55,7 @@ export class SourceRegistry implements SourceScope {
   validate(id: string, value: { enabled: boolean; config: unknown }): { enabled: boolean; config: Record<string, unknown> } {
     const kind = this.kinds.get(id)
     if (!kind) throw new Error(`Source kind not installed: ${id}`)
+    if (id === 'github' && value.config && typeof value.config === 'object' && ('repository' in value.config || 'cli' in value.config)) throw new UserError('githubAccountsMoved')
     return { enabled: value.enabled, config: kind.schema.parse(value.config) }
   }
   /** Validates each Source's part of a submitted Policy against its kind; policy parts for uninstalled Source kinds are kept as stored. */
@@ -133,6 +135,6 @@ export class SourceRegistry implements SourceScope {
   /** Falls back to schema defaults and disables the instance when stored configuration fails validation. */
   private resolve(kind: SourceKind, stored: { enabled: boolean; config: Record<string, unknown> } | undefined): SourceInstance {
     const parsed = kind.schema.safeParse(stored?.config ?? {})
-    return { id: kind.kind, kind: kind.kind, enabled: parsed.success && (stored?.enabled ?? true), config: parsed.success ? parsed.data : kind.schema.parse({}) }
+    return { id: kind.kind, kind: kind.kind, enabled: parsed.success && (stored?.enabled ?? kind.kind !== 'github'), config: parsed.success ? parsed.data : kind.schema.parse({}) }
   }
 }

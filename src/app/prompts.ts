@@ -1,4 +1,5 @@
 /** Manages versioned role prompts, behavioral policies, and operational skills independently of access settings. */
+import legacyTeamDefaults from '../../prompts/legacy-team-defaults.json' with { type: 'json' }
 import { z } from 'zod'
 import { UserError, key } from '../core/index.ts'
 import { policyVersion, type Settings, type SettingsOrigin } from '../policy.ts'
@@ -135,8 +136,13 @@ export class PromptConflict extends Error {}
 export class Prompts {
   private readonly versions: Versions<PromptVersion>
   constructor(private readonly store: Store, private readonly maxChars: () => number, private readonly environment: () => Variable[] | undefined,
-    private readonly feishu: () => boolean) {
+    private readonly feishu: () => boolean, private readonly github: () => boolean = () => false) {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
+  }
+  /** Custom instructions remain intact; flag capability-dependent text for operator review. */
+  capabilityReview(config: PromptConfig): string[] {
+    if (this.github()) return []
+    return (['scope', 'delivery'] as const).filter(name => config[name] !== teamDefaults[name] && /github|\bPR\b|pull request|gh (?:api|pr)/i.test(config[name]))
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
   compose(config: PromptConfig, role: Role, variables = this.environment()): string {
@@ -144,7 +150,7 @@ export class Prompts {
   }
   /** Returns skills to register in every Session: built-in Source skills (`feishu` only when a Feishu bot is configured) followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
-    return [...this.feishu() ? ['feishu'] : [], 'github', ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
+    return [...this.feishu() ? ['feishu'] : [], ...this.github() ? ['github'] : [], ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
   }
   current(): PromptVersion {
     const revision = this.versions.revision()
@@ -154,7 +160,9 @@ export class Prompts {
   version(revision: number): PromptVersion {
     const version = this.versions.get(revision) ?? (revision === 0 && this.versions.revision() === 0 ? this.current() : undefined)
     if (!version) throw new UserError('unknownPromptRevision', { revision: String(revision) })
-    return version
+    const config = { ...version.config }
+    for (const name of ['scope', 'delivery'] as const) if (config[name] === legacyTeamDefaults[name]) config[name] = teamDefaults[name]
+    return { ...version, config }
   }
   /**
    * Parse a configuration: an override names a built-in part, holds text and keeps its template's placeholders, and records the

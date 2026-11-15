@@ -106,8 +106,8 @@ it('writes a schema 10 database in its current shape once, so nothing reads an o
   expect(settings.executor).not.toHaveProperty('reviewer')
   expect(settings.executor.prepare).toBe('echo $DSH_SUPERAGENT_DIR')
   // The current settings are the newest revision, which the migration saved, since the newest saved one differs from them.
-  const [current, , second, first] = store.settingsHistory()
-  expect(current).toMatchObject({ revision: 4, source: 'internal', settings })
+  const [current, , , second, first] = store.settingsHistory()
+  expect(current).toMatchObject({ revision: 5, source: 'internal', settings })
   expect(store.get('settings')).toBeUndefined()
   expect(first).toMatchObject({ source: 'panel', settings: { sources: { feishu: { config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }] } } } } })
   expect(second).toMatchObject({ source: 'tool', settings: { sources: { 'github-issue': { enabled: true } } } })
@@ -202,7 +202,7 @@ it('changes nothing when one step fails: the database stays at schema 10 as it w
     updatedAt: '2', mandate: mandate({ via: 'listed' }), meta: { sourceTriggerId: 'trig-1', workspace: '/w/fix-1' } }
   // The current settings must validate; an invalid value aborts the migration transaction.
   schema10(path, { settings: { executor: { maxWorkers: 'many' } } }, { ticket: [ticket] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: the settings: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 12 failed: the settings: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t1'").get()!.value))).toMatchObject({ meta: { workspace: '/w/fix-1' } })
@@ -475,7 +475,7 @@ it('names the ticket it stopped at when a ticket does not read, and leaves the d
   const path = join(directory, 'db.sqlite')
   const { inputs: _inputs, ...broken } = ticket10('t9')
   schema10(path, {}, { ticket: [broken] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: ticket t9: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 12 failed: ticket t9: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t9'").get()!.value))).toEqual(broken)
@@ -488,8 +488,8 @@ it('makes the newest saved revision the current settings when it holds them, and
   schema10(path, { settings: { executor: { maxWorkers: 4 } }, 'settings-revision': 1, 'settings-version:1': version(1, {}),
     'settings-version:2': version(2, { executor: { maxWorkers: 4 } }) })
   const store = new Store(path)
-  expect(store.settingsHistory().map(item => item.revision)).toEqual([2, 1])
-  expect([store.get(KV.settings.revision), store.settings().executor.maxWorkers, store.get('settings')]).toEqual([2, 4, undefined])
+  expect(store.settingsHistory().map(item => item.revision)).toEqual([3, 2, 1])
+  expect([store.get(KV.settings.revision), store.settings().executor.maxWorkers, store.get('settings')]).toEqual([3, 4, undefined])
   store.close()
 })
 
@@ -535,5 +535,37 @@ it('delivers the candidate of an Eval in progress at the upgrade again, so its d
   const store = new Store(path)
   const effects = store.db.prepare("SELECT key, value FROM effect WHERE kind = 'assessment'").all().map(row => [row.key, JSON.parse(String(row.value))])
   expect(effects).toEqual([['e9', { triggerId: 'issue-9' }]])
+  store.close()
+})
+
+it('separates schema 11 GitHub accounts transactionally, advances both block revisions, and preserves raw audit history', () => {
+  const path = join(directory, 'github-optional.sqlite')
+  let store = new Store(path)
+  const settings = store.settings()
+  const { integrations: _integrations, ...legacy } = settings
+  const old = { ...legacy, sources: { github: { enabled: false, config: { repository: 'acme/widgets', cli: '/agent-gh', pollSeconds: 90 } } } }
+  store.set(KV.settings.revision, 1)
+  store.set(KV.settings.version(1), { revision: 1, savedAt: '', source: 'panel', policyVersion: '', policyChanged: false, notified: [], settings: old } as never)
+  store.set(KV.settings.block('source:github'), 4)
+  store.set(KV.store.schema, 11)
+  store.close()
+  store = new Store(path)
+  expect(store.settings().integrations.github).toEqual({ enabled: true, repository: 'acme/widgets', cli: '/agent-gh' })
+  expect(store.settings().sources.github).toEqual({ enabled: false, config: { pollSeconds: 90 } })
+  expect(store.blockRevision('integration:github')).toBe(1)
+  expect(store.blockRevision('source:github')).toBe(5)
+  expect(store.get(KV.settings.version(1))?.settings).toEqual(old)
+  expect(store.settingsHistory().at(-1)?.settings.integrations.github.enabled).toBe(true)
+  const revision = store.get(KV.settings.revision)
+  store.close()
+  store = new Store(path)
+  expect(store.get(KV.settings.revision)).toBe(revision)
+  store.close()
+})
+
+it('preserves complete schema 10 GitHub credentials through both migration steps', () => {
+  const store = opened({ settings: { sources: { github: { enabled: false, config: { repository: 'acme/widgets', cli: '/agent-gh' } } } } })
+  expect(store.settings().integrations.github).toEqual({ enabled: true, repository: 'acme/widgets', cli: '/agent-gh' })
+  expect(store.settings().sources.github).toEqual({ enabled: false, config: {} })
   store.close()
 })

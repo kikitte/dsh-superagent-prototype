@@ -17,7 +17,7 @@ import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, ty
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
-import type { Deployment, Machine } from '../deployment.ts'
+import { IntegrationUnavailable, type Deployment, type Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
@@ -81,6 +81,7 @@ export class Runtime extends Service implements SourceHost {
   private readonly disposers: (() => void)[] = []
   private releaseLock?: () => Promise<void>
   private closingFlag = false
+  private mainSessionAvailable = false
   private stopping?: Promise<void>
   private readonly sourceDeps: SourceContextDeps
   private readonly toolHost: MainToolsHost & ExecutorToolsHost
@@ -103,10 +104,15 @@ export class Runtime extends Service implements SourceHost {
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
-      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
+      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu, () => setup.configured() && !!setup.deployment.github)
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
-      const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
+      const capabilityDeployment = (): Deployment => setup.current(store.settings()) ? setup.deployment : { ...setup.deployment, github: undefined, feishu: undefined }
+      const assertActive = () => {
+        this.lifetime.throwIfAborted()
+        if (!setup.current(store.settings())) throw new Error('Integration settings changed; waiting for controlled restart')
+      }
+      const commands = this.commands = new Commands(capabilityDeployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
       const effects = this.effects = new Effects(store, board)
       const sources = this.sources = new SourceRegistry(() => store.settings(), board, kind => {
@@ -157,9 +163,9 @@ export class Runtime extends Service implements SourceHost {
           if (followup) sessions.relay(followup.id, followup.text)
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
-          if (ended && setup.configured()) {
+          if (ended && setup.configured() && setup.deployment.github && sources.kind('github')) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
-            for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+            for (const message of pullEndNotices(ended, request, setup.deployment.github!.repository)) outbox.send(message)
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
@@ -167,11 +173,16 @@ export class Runtime extends Service implements SourceHost {
       const evaluateDue = () => { engine.evaluateDue(); evals.set(evalsHealth(store)) }
       const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects,
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
-      this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
-        get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
-      this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
-        get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+      this.sourceDeps = { assertActive, lifetime: this.lifetime, store, engine, outbox, commands, sources, get ready() { return runtime.ready },
+        get deployment() { return capabilityDeployment() }, configured: () => setup.configured(),
+        get githubProblem() { return setup.githubProblem }, get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
+      this.toolHost = { assertActive, context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
+        get github() {
+          assertActive()
+          if (!setup.deployment.github) throw new IntegrationUnavailable()
+          if (!sources.kind('github')) throw new IntegrationUnavailable('Install the GitHub Source plugin to bind and track PRs. CLI access remains available.')
+          return runtime.context({ kind: 'github', health: ['github'] })
+        },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
@@ -193,7 +204,7 @@ export class Runtime extends Service implements SourceHost {
   get feishuProblem(): SetupProblem | undefined { return this.setup.feishuProblem }
   links(): LinkTarget {
     const resolved = this.setup.configured() ? this.setup.deployment : undefined
-    const links = resolved ? { repository: resolved.repository, ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
+    const links = resolved ? { repository: resolved.github?.repository, ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
     return channel => this.sources.link(channel, links)
   }
   ticketEnvironment(ticket: Ticket): Variable[] {
@@ -220,6 +231,7 @@ export class Runtime extends Service implements SourceHost {
     this.sessions.install()
     this.executor.install()
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    this.mainSessionAvailable = true
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
@@ -232,8 +244,11 @@ export class Runtime extends Service implements SourceHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+      get directoryProcessOwnerAvailable() { return !!(runtime.ctx.get('executionDirectorySafety') as DirectorySafety | undefined)?.processes },
+      get integrationsCurrent() { return setup.current(store.settings()) },
+      get mainSessionAvailable() { return runtime.mainSessionAvailable && setup.current(store.settings()) },
       get deployment() { return setup.deployment },
-      get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
+      get githubProblem() { return setup.githubProblem }, get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
       checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
   }
@@ -251,10 +266,12 @@ export class Runtime extends Service implements SourceHost {
       await this.executor.shutdown()
       this.executor.dispose()
       this.sessions.dispose()
-      for (const dispose of this.disposers.reverse()) dispose()
       await this.ctx.sessionPersistence.flush()
     } finally {
       // Close the database before releasing the directory lock so another process cannot open the database mid-write; a compromised lock may already be released.
+      for (const dispose of this.disposers.splice(0).reverse()) {
+        try { dispose() } catch (error) { this.ctx.logger.warn('Could not release management registration: %s', String(error)) }
+      }
       this.setup.restore()
       try { this.store.close() } finally {
         const unreleased = (error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release its state directory lock: %s',

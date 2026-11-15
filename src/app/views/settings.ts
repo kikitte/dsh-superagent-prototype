@@ -24,6 +24,7 @@ export function settingsView(store: Store, sources: SourceRegistry, health: Heal
   const settings = store.settings()
   const block = <V>(name: 'policy' | 'eval' | 'executor', value: V) => ({ value, revision: store.blockRevision(name) })
   return {
+    integration: { value: settings.integrations.github, revision: store.blockRevision('integration:github'), notice: store.get<string>('github-integration-migration-notice') },
     policyVersion: policyVersion(settings),
     blocks: { policy: block('policy', settings.policy), eval: block('eval', settings.eval), executor: block('executor',
       settings.executor) },

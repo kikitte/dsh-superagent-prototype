@@ -172,9 +172,9 @@ export function ExecutionSettings() {
   const { blocks, environment, sources } = useSettings().settings
   // Keep raw user text (such as separators between blocked commands) in the draft and parse only on save.
   const executor = blocks.executor.value
-  const saved = { ...executor, maxWorkers: String(executor.maxWorkers), blockedCommands: executor.blockedCommands.join(' ') }
+  const saved = { ...executor, gitAuthorName: executor.gitAuthor?.name ?? '', gitAuthorEmail: executor.gitAuthor?.email ?? '', maxWorkers: String(executor.maxWorkers), blockedCommands: executor.blockedCommands.join(' ') }
   const draft = useBlockDraft('executor', saved, blocks.executor.revision,
-    value => ({ ...value, maxWorkers: numberOf(value.maxWorkers), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
+    ({ gitAuthorName, gitAuthorEmail, ...value }) => ({ ...value, gitAuthor: gitAuthorName || gitAuthorEmail ? { name: gitAuthorName, email: gitAuthorEmail } : null, maxWorkers: numberOf(value.maxWorkers), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
   const value = draft.value
   const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
   const prepare = useRef<HTMLTextAreaElement>(null)
@@ -189,6 +189,9 @@ export function ExecutionSettings() {
       <Fields disabled={draft.busy}>
         <div className="dt-form dt-block">
           <h2 className="dt-block-title">{t('term.executor')}<InfoTip text={t('executorIntro')} /></h2>
+          <Field label={t('contextDirectory')} hint={t('contextDirectoryHint')}><Input value={value.contextDirectory} onChange={event => edit({ contextDirectory: event.target.value })} /></Field>
+          <Field label={t('gitAuthorName')}><Input value={value.gitAuthorName} onChange={event => edit({ gitAuthorName: event.target.value })} /></Field>
+          <Field label={t('gitAuthorEmail')}><Input value={value.gitAuthorEmail} onChange={event => edit({ gitAuthorEmail: event.target.value })} /></Field>
           <Section title={t('executorModel')} hint={t('executorModelHint')}><ModelField id="dt-worker-model" value={value.model}
             onChange={model => edit({ model })} /></Section>
           <Field label={t('maxWorkers')} hint={t('maxWorkersHint')}>

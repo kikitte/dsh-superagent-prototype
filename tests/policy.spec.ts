@@ -15,7 +15,7 @@ const feishuSource = (config: { chats: { chatId: string; listen: 'mentions' | 'a
 const base = SettingsSchema.parse({
   policy: { sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'Alice' }] } } },
   eval: { mode: 'auto' },
-  sources: { feishu: feishuSource({ chats: [{ chatId: CHAT, listen: 'mentions' }, { chatId: OBSERVED, listen: 'all' }], directMessages: true }) },
+  sources: { github: { enabled: true, config: {} }, feishu: feishuSource({ chats: [{ chatId: CHAT, listen: 'mentions' }, { chatId: OBSERVED, listen: 'all' }], directMessages: true }) },
 })
 function setup(settings: Settings = base) {
   const sources = new SourceRegistry(() => settings)
@@ -35,13 +35,13 @@ describe('source scope', () => {
     expect(sources.scope(feishu({ meta: { chatId: OBSERVED, direct: false, mentioned: false } }))).toEqual({ listened: true, observed: true, row: OBSERVED })
     expect(sources.scope(feishu({ meta: { chatId: 'oc_other', direct: false, mentioned: true } }))).toEqual({ listened: false, reason: 'chat_not_allowed' })
     expect(sources.scope(feishu({ meta: { chatId: 'p2p', direct: true, mentioned: false } }))).toEqual({ listened: true, observed: false, row: 'direct' })
-    expect(setup({ ...base, sources: { feishu: feishuSource({ chats: [], directMessages: false }) } }).sources.scope(feishu({ meta: { chatId: 'p2p', direct: true, mentioned: false } }))).toEqual({ listened: false, reason: 'direct_messages_not_allowed' })
+    expect(setup({ ...base, sources: { github: { enabled: true, config: {} }, feishu: feishuSource({ chats: [], directMessages: false }) } }).sources.scope(feishu({ meta: { chatId: 'p2p', direct: true, mentioned: false } }))).toEqual({ listened: false, reason: 'direct_messages_not_allowed' })
     expect(sources.scope(github('anyone'))).toEqual({ listened: true, observed: false })
   })
   it('listens to nothing from a configured Source whose plugin is not loaded, and keeps an invalid stored configuration disabled', () => {
     const bare = new SourceRegistry(() => base)
     expect(bare.scope(feishu())).toEqual({ listened: false, reason: 'source_not_installed' })
-    expect(bare.scope(github('anyone'))).toEqual({ listened: true, observed: false })
+    expect(bare.scope(github('anyone'))).toEqual({ listened: false, reason: 'source_not_installed' })
     const broken = new SourceRegistry(() => SettingsSchema.parse({ sources: { feishu: { enabled: true, config: { chats: 'oops' } } } }))
     broken.register(feishuKind)
     expect(broken.instance('feishu')).toMatchObject({ enabled: false })
@@ -189,7 +189,7 @@ describe('revalidating a Mandate from the admission table', () => {
     const chats = item.scope === 'none' ? [] : [{ chatId: CHAT, listen: item.scope }]
     const settings = SettingsSchema.parse({
       eval: { mode: item.mode },
-      sources: { feishu: feishuSource({ chats, directMessages: true }) },
+      sources: { github: { enabled: true, config: {} }, feishu: feishuSource({ chats, directMessages: true }) },
       policy: {
         rules: [{ id: 'copy', name: 'Copy', enabled: item.rule, instruction: 'x' }],
         sources: { feishu: { allowed: item.listed ? [{ id: SENDER }] : [], admission: { [CHAT]: Object.fromEntries(cells.map(cell => [cell, grant(cell)])) } } },
@@ -210,7 +210,7 @@ describe('revalidate and version', () => {
     expect(policy.revalidate(mandate)).toBe(true)
     const nobody = { ...base, policy: { ...base.policy, sources: {} } }
     expect(setup(nobody).policy.revalidate(mandate)).toBe(false)
-    const silent = { ...base, sources: { feishu: feishuSource({ chats: [], directMessages: true }) } }
+    const silent = { ...base, sources: { github: { enabled: true, config: {} }, feishu: feishuSource({ chats: [], directMessages: true }) } }
     expect(setup(silent).policy.revalidate(mandate)).toBe(false)
     // A Mandate from before the gate recorded how it admitted a Trigger holds while its sender is listed and the Source listens.
     const listed: MandateBasis = { via: 'listed', source: 'feishu', scope: { chatId: CHAT, direct: false }, sender: 'Alice' }
@@ -225,7 +225,7 @@ describe('revalidate and version', () => {
   it('changes the Policy version for rules, accept mode and the Sources\' parts, not for pause, concurrency, models or Source configuration', () => {
     const version = setup().version
     expect(setup({ ...base, paused: true, executor: { ...base.executor, maxWorkers: 9 }, eval: { ...base.eval, timeoutSeconds: 300 }, sources: { ...base.sources, github: { enabled: true, config: { pollSeconds: 600 } } } }).version).toBe(version)
-    expect(setup({ ...base, sources: { feishu: feishuSource({ chats: [], directMessages: false }) } }).version).toBe(version)
+    expect(setup({ ...base, sources: { github: { enabled: true, config: {} }, feishu: feishuSource({ chats: [], directMessages: false }) } }).version).toBe(version)
     expect(setup({ ...base, eval: { ...base.eval, mode: 'off' } }).version).not.toBe(version)
     expect(setup({ ...base, policy: { ...base.policy, sources: { ...base.policy.sources, github: { allowed: [], admission: {} } } } }).version).not.toBe(version)
   })
@@ -251,7 +251,7 @@ describe('settings migration', () => {
     const migrated = SettingsSchema.parse(migrateSettings({ paused: true, allowedChats: [CHAT, OBSERVED], allowDirectMessages: false, pollSeconds: 120, maxWorkers: 5, members: [{ name: 'A', feishuId: MEMBER, github: 'a' }],
       models: { orchestrator: { provider: 'p', model: 'm' }, worker: null, admission: null }, admission: { mode: 'auto', chats: [OBSERVED], maxEvaluators: 1, timeoutSeconds: 90, rules: [] } }))
     expect(migrated).toEqual({
-      paused: true,
+      paused: true, integrations: SettingsSchema.parse({}).integrations,
       sources: { feishu: feishuSource({ chats: [{ chatId: CHAT, listen: 'mentions' }, { chatId: OBSERVED, listen: 'all' }], directMessages: false }), github: { enabled: true, config: { pollSeconds: 120 } } },
       policy: { rules: [], sources: { feishu: { allowed: [{ id: MEMBER, name: 'A' }], admission: {} }, github: { allowed: [{ id: 'a' }], admission: {} } } },
       eval: { mode: 'auto', timeoutSeconds: 90, model: { provider: 'p', model: 'm' } },

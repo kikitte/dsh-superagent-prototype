@@ -4,9 +4,10 @@ import { fill } from './infra/text.ts'
 export type SetupPlace = 'deployment' | 'github' | 'feishu'
 export const SETUP_PROBLEMS = {
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
+  githubGitFailed: ['github', 'GitHub credential routing could not be verified; GitHub access is unavailable.'],
   gitTooOld: ['deployment', 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
   environmentFailed: ['deployment', 'Preparing the agent environment failed.'],
-  repositoryUnset: ['github', 'The GitHub Source names no repository.'],
+  repositoryUnset: ['github', 'The GitHub integration names no repository.'],
   agentCliUnset: ['github', 'The agent GitHub CLI is not set.'],
   agentCliMissing: ['github', 'The agent GitHub CLI was not found.'],
   agentCliSignedOut: ['github', 'The agent GitHub CLI cannot read its account.'],

@@ -8,6 +8,7 @@ import { checkedImText } from '../infra/text.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { Deployment } from '../deployment.ts'
 import { admissionContext } from '../sources/admission-context.ts'
+import { readLocalContext } from './local-context.ts'
 import { readRepositoryPath } from '../sources/github-read.ts'
 import type { TriggerContext } from '../sources/kind.ts'
 import { relatedTickets } from './cards.ts'
@@ -215,7 +216,7 @@ export class MasterAssessor implements Assessor {
     const placementContext = placement && JSON.stringify(placement).length <= 8000 ? placement : {
       ...(placement ? { version: placement.version, instructionRevision: placement.instructionRevision } : {}), read: 'placement' }
     const others = candidate.triggers.filter(item => item.id !== trigger.id)
-    return { trigger_id: trigger.id, strength: candidate.strength, mode: settings.eval.mode,
+    return { repository_context: settings.executor.contextDirectory ? { kind: 'local', directory: settings.executor.contextDirectory } : this.host.deployment.github ? { kind: 'github', repository: this.host.deployment.github.repository } : { kind: 'unavailable', reason: 'No contextDirectory or ready GitHub integration; assess the authorized message when sufficient.' }, trigger_id: trigger.id, strength: candidate.strength, mode: settings.eval.mode,
       source: { kind: trigger.source, actor: trigger.actor.id, thread: threadKey(trigger.threads[0]!), ...(trigger.url
         ? { url: trigger.url } : {}) },
       ...cut(trigger.text, TRIGGER_CHARS), ...imageIds(source?.messageId ?? '', trigger.text),
@@ -273,7 +274,12 @@ export class MasterAssessor implements Assessor {
         body = JSON.stringify({ images: references, next_read: next, ...result.body })
       }
       else {
-        body = await readRepositoryPath(commands, read.path!, read.resource === 'directory' ? 'directory' : 'file')
+        const root = this.host.settings().executor.contextDirectory
+        const kind = read.resource === 'directory' ? 'directory' : 'file'
+        const bounded = AbortSignal.any([this.controller.signal, signal, AbortSignal.timeout(this.host.deployment.admissionContextTimeoutMs.get())])
+        if (root) body = await readLocalContext(root, read.path!, kind, bounded)
+        else if (this.host.deployment.github) body = await readRepositoryPath(commands.withSignal(bounded), read.path!, kind)
+        else throw new Error('Repository context unavailable: configure executor.contextDirectory or enable GitHub in Deployment')
       }
       snapshots.set(cacheKey, body)
       return textPage(read.resource, body, read.offset, 4000)

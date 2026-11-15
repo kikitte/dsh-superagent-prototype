@@ -103,14 +103,14 @@ it('states each Source by the first state that holds', () => {
   const host = views()
   const states = (setup: Parameters<typeof sourcesStatus>[2], health: Parameters<typeof sourcesStatus>[1] = {}) =>
     Object.fromEntries(sourcesStatus(host, health, setup).map(source => [source.id, source.state]))
-  expect(states({})).toEqual({ feishu: 'starting', github: 'starting' })
+  expect(states({})).toEqual({ feishu: 'starting', github: 'off' })
   expect(states({}, { feishu: { state: 'ready', detail: '' }, history: { state: 'paused', detail: '' }, github: { state: 'error',
     detail: 'x' } }))
-    .toEqual({ feishu: 'paused', github: 'error' })
+    .toEqual({ feishu: 'paused', github: 'off' })
   const problem = { place: 'deployment', code: 'stateDirUnset', values: {}, detail: '' } as never
   expect(states({ problem }, { feishu: { state: 'ready', detail: '' }, history: { state: 'ready', detail: '' }, github: { state: 'ready',
     detail: '' } }))
-    .toEqual({ feishu: 'setup', github: 'setup' })
+    .toEqual({ feishu: 'setup', github: 'off' })
 })
 
 it('follows the Ticket\'s stage: a blocked Ticket a person answered since is working, with no retry, note or turn end', () => {

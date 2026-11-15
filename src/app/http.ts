@@ -13,6 +13,7 @@ import { SettingsConflict, type Settings } from './settings.ts'
 import { DirectorySettingsError } from './directory-settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
+import { IntegrationUnavailable } from '../deployment.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
 import { DirectoryRecoveryConflict } from '../executor/directories.ts'
@@ -35,13 +36,17 @@ export interface HttpHost {
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
   readonly sources: SourceRegistry
-  readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'preview' | 'save' | 'defaultChanged'>
+  readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'preview' | 'save' | 'defaultChanged' | 'capabilityReview'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount' | 'directories' | 'wake'>
   readonly health: Record<string, Health>
   readonly machine: Machine
+  readonly integrationsCurrent?: boolean
+  readonly directoryProcessOwnerAvailable?: boolean
+  readonly mainSessionAvailable?: boolean
+  readonly githubProblem?: SetupProblem | undefined
   readonly masterId: string
   /** Resolves once startup finishes or setup determines what is still missing. */
   readonly ready: Promise<void>
@@ -86,6 +91,7 @@ function failure(error: unknown): [number, Record<string, unknown>] {
     const issues = error.issues.map(issue => ({ path: issue.path.join('.'), message: issue.message }))
     return [400, { error: `Invalid settings: ${issues.map(issue => issue.path).join(', ')}`, issues }]
   }
+  if (error instanceof IntegrationUnavailable) return [400, { error: error.message, code: error.code, integration: error.integration }]
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof DirectorySettingsError) return [400, { error: error.message }]
@@ -101,8 +107,11 @@ function machineView({ stateDir, promptMaxChars, admissionContextMaxPages, admis
 function setupView(runtime: HttpHost) {
   const resolved = runtime.configured() ? runtime.deployment : undefined
   return {
+    directorySafety: { processOwnerAvailable: runtime.directoryProcessOwnerAvailable ?? false, processOwner: 'Host integration required for release/reopen/restart recovery; missing evidence retains quarantine.' },
+    coreReady: runtime.configured(), mainSessionAvailable: runtime.mainSessionAvailable ?? false,
+    github: { status: runtime.integrationsCurrent === false ? 'checking' : !runtime.store.settings().integrations.github.enabled ? 'off' : runtime.githubProblem ? 'error' : resolved?.github ? 'ready' : 'checking', problem: runtime.githubProblem ?? null, intake: !!runtime.sources.instance('github')?.enabled && !!resolved?.github, adapter: !!runtime.sources.kind('github') },
     machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null, feishuProblem: runtime.feishuProblem ?? null,
-    accounts: resolved ? { repository: resolved.repository, agent: resolved.github.login, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
+    accounts: resolved ? { repository: resolved.github?.repository, agent: resolved.github?.login, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
   }
 }
 /** Build the `/orchestrator/api/state` response consumed by the management panel and `scripts/dsh-superagent status` (`docs/006-deployment.md`). */
@@ -114,7 +123,7 @@ export function stateView(runtime: HttpHost) {
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
-  problem: runtime.setupProblem, feishuProblem: runtime.feishuProblem })
+  githubProblem: runtime.githubProblem, problem: runtime.setupProblem, feishuProblem: runtime.feishuProblem })
 export type StateView = ReturnType<typeof stateView>
 /** Builds a ticket's detail view; `environment` is empty while waiting for setup because it requires the resolved deployment. */
 function ticketPage(runtime: HttpHost, id: string) {
@@ -135,8 +144,9 @@ function promptsView(runtime: HttpHost, revision: number | undefined, offset: nu
   const shown = revision === undefined || revision === current.revision ? current : runtime.prompts.version(revision)
   // Each built-in part with the key of its text, which an override records as its base, and for the overrides shown whose
   // built-in text changed since, the text they were edited from when known.
+  const review = runtime.prompts.capabilityReview(shown.config)
   const parts = Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) }))
-  return { masterId: runtime.masterId, current: shown, defaults: defaultPrompts(), sections: TEAM_SECTIONS, skillName: SKILL_NAME.source,
+  return { ...review.length ? { capabilityReview: review } : {}, masterId: runtime.masterId, current: shown, defaults: defaultPrompts(), sections: TEAM_SECTIONS, skillName: SKILL_NAME.source,
     builtin: Object.keys(sourceSkills), skillPrefix: SKILL_PREFIX, parts, defaultChanged: runtime.prompts.defaultChanged(shown.config),
     ...runtime.sessions.status(), ...runtime.prompts.history(offset) }
 }
@@ -156,7 +166,7 @@ const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.litera
 const count = z.coerce.number().int().nonnegative()
 const PromptsQuery = z.object({ revision: count.optional(), offset: count.default(0) })
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
-const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
+const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor', 'integration:github']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
 
 function routes(runtime: HttpHost): Routes {
@@ -166,7 +176,7 @@ function routes(runtime: HttpHost): Routes {
   return {
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
-      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
+      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem, [runtime.githubProblem, runtime.feishuProblem].filter((problem): problem is SetupProblem => !!problem)),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),

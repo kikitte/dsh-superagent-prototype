@@ -1,7 +1,8 @@
 /**
- * Migrates a schema 10 database to schema 11 in a single transaction so runtime readers never convert legacy shapes.
+ * Migrates schemas 10/11 to schema 12 transactionally, preserving historical settings snapshots.
  * Databases older than schema 10 are rejected: this version cannot migrate them.
  */
+import legacyTeamDefaults from '../../prompts/legacy-team-defaults.json' with { type: 'json' }
 import { basename } from 'node:path'
 import { z } from 'zod'
 import { isoTime, said, type AcceptMode, type AdmissionCell, type ChannelRef, type Decision, type Execution, type Follow, type MandateBasis,
@@ -17,7 +18,7 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -168,8 +169,9 @@ function settingsAsVersions(store: Store): void {
   const versions = new Versions<SettingsVersion>(store, KV.settings.revision, KV.settings.version)
   const newest = Math.max(versions.revision(), ...versions.list().map(version => version.revision))
   if (newest) store.set(KV.settings.revision, newest)
-  if (JSON.stringify(versions.current()?.settings) !== JSON.stringify(current)) {
-    const settings = SettingsSchema.parse(current)
+  const settings = SettingsSchema.parse(githubOptionalSettings(current))
+  const previous = SettingsSchema.safeParse(githubOptionalSettings(versions.current()?.settings))
+  if (!previous.success || JSON.stringify(previous.data) !== JSON.stringify(settings)) {
     versions.save(revision => ({ revision, savedAt: new Date().toISOString(), source: 'internal', policyVersion: policyVersion(settings),
       policyChanged: false, notified: [], settings }))
   }
@@ -187,14 +189,15 @@ const REMOVED_SOURCES: readonly string[] = ['github-issue']
 function migrateSettingsRecords(store: Store): void {
   const stored = store.get<unknown>('settings')
   if (stored !== undefined) {
-    const settings = SettingsSchema.parse(migrateSettings(stored))
+    const settings = SettingsSchema.parse(githubOptionalSettings(migrateSettings(stored)))
     store.set('settings', { ...settings, sources: Object.fromEntries(Object.entries(settings.sources).filter(([id]) => !REMOVED_SOURCES.includes(id))) })
   }
   // Preserve unparseable historical revisions as-is so a corrupt history entry does not block startup.
   for (const name of store.keys('settings-version:')) {
     const version = store.get<{ source: string; settings: unknown }>(name)!
-    const settings = SettingsSchema.safeParse(migrateSettings(version.settings))
-    store.set(name, { ...version, source: ORIGINS[version.source] ?? version.source, ...settings.success ? { settings: settings.data } : {} })
+    const normalized = migrateSettings(version.settings)
+    const settings = SettingsSchema.safeParse(githubOptionalSettings(normalized))
+    store.set(name, { ...version, source: ORIGINS[version.source] ?? version.source, ...settings.success ? { settings: normalized } : {} })
   }
 }
 interface Member { name?: string; feishuId?: string; github?: string }
@@ -287,7 +290,7 @@ function legacyText(value: string): string {
 function normalize(config: unknown): PromptConfig {
   const legacy = LegacyPromptConfigSchema.safeParse(config)
   const limit = legacy.success ? /fewer than (\d+) lines \(additions plus deletions\)/.exec(legacy.data.guides.work ?? '')?.[1] : undefined
-  const current = legacy.success ? { ...teamDefaults, delivery: limit ? teamDefaults.delivery.replace(autoMergeThreshold(200), autoMergeThreshold(Number(limit))) : teamDefaults.delivery,
+  const current = legacy.success ? { ...teamDefaults, delivery: limit ? legacyTeamDefaults.delivery.replace(autoMergeThreshold(200), autoMergeThreshold(Number(limit))) : legacyTeamDefaults.delivery,
     skills: Object.fromEntries(Object.entries(legacy.data.guides).filter(([name]) => !LEGACY_FIXED.has(name)).map(([name, body]) => [name, legacyText(body)])) }
     : PromptConfigSchema.parse(config)
   return { communication: currentNames(current.communication), scope: currentNames(current.scope), delivery: currentNames(current.delivery),
@@ -317,7 +320,7 @@ function migratePrompts(store: Store): void {
   const mapped = ((Array.isArray(policy?.members) ? policy.members : []) as Member[]).filter(person => person.feishuId && person.github)
   const revision = store.get<number>('prompt-revision')
   const current = revision === undefined ? undefined : store.get<PromptVersion>(`prompt-version:${revision}`)
-  const config = current?.config ?? { ...teamDefaults, skills: {} }
+  const config = current?.config ?? { ...teamDefaults, ...(limit !== 200 ? { delivery: legacyTeamDefaults.delivery } : {}), skills: {} }
   const delivery = config.delivery.includes(autoMergeThreshold(200)) ? config.delivery.replace(autoMergeThreshold(200), autoMergeThreshold(limit))
     : limit === 200 ? config.delivery : `${config.delivery}\nEnable auto-merge only on a PR that changes fewer than ${limit} lines (additions plus deletions).`
   const identities = mapped.length && !config.skills.identities ? { identities: ['The same colleague may use a different account on each Source. When you mention, assign or request a review from someone you met on another Source, use their account on this one:',
@@ -613,4 +616,28 @@ function assessmentTriggers(store: Store): void {
     store.db.prepare(`INSERT INTO effect (kind, key, value, seq, due, since) VALUES ('assessment', ?, ?, ?, ?, ?) ON CONFLICT(kind, key) DO NOTHING`)
       .run(evaluation.id, JSON.stringify({ triggerId: evaluation.triggerIds[0] }), ++seq, Date.now(), new Date().toISOString())
   }
+}
+
+/** Normalize old settings on reads without rewriting audit history or applying historical accounts. */
+export function githubOptionalSettings(value: unknown): unknown {
+  if (!isObject(value)) return value
+  const sources = isObject(value.sources) ? value.sources : {}
+  const source = isObject(sources.github) ? sources.github : undefined
+  const config = source && isObject(source.config) ? source.config : {}
+  const { repository, cli, ...intake } = config
+  const integrations = isObject(value.integrations) ? value.integrations : {}
+  const complete = typeof repository === 'string' && !!repository.trim() && typeof cli === 'string' && !!cli.trim()
+  return { ...value, integrations: { ...integrations, github: integrations.github ?? { enabled: complete, repository: repository ?? '', cli: cli ?? '' } },
+    sources: { ...sources, ...source ? { github: { ...source, config: intake } } : {} } }
+}
+/** Separate integration ownership transactionally, advance revisions and keep original snapshots. */
+export function migrateTo12(store: Store): void {
+  const revision = store.get(KV.settings.revision) ?? 0
+  const version = revision ? store.get<SettingsVersion>(KV.settings.version(revision)) : undefined
+  if (!version) return
+  const settings = SettingsSchema.parse(githubOptionalSettings(version.settings))
+  store.saveSettings(settings, { source: 'internal', block: 'integration:github', policyVersion: policyVersion(settings), policyChanged: false, notified: [] })
+  store.set(KV.settings.block('source:github'), store.blockRevision('source:github') + 1)
+  const github = settings.integrations.github
+  if (!github.enabled && (github.repository || github.cli)) store.set('github-integration-migration-notice', 'Partial GitHub credentials retained as a disabled draft. Review integration:github in Deployment.')
 }

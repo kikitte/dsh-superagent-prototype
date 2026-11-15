@@ -25,7 +25,7 @@ describe('Source registry', () => {
     const sources = new SourceRegistry(() => settings)
     sources.register(probe); sources.register(githubKind)
     expect(sources.instances()).toEqual([
-      { id: 'github', kind: 'github', enabled: true, config: { repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3,
+      { id: 'github', kind: 'github', enabled: false, config: { pollSeconds: 60, failuresBeforeError: 3,
         observeIssues: false, observePulls: false, observeComments: false, observeCi: false }, installed: true },
       { id: 'probe', kind: 'probe', enabled: false, config: { interval: 9 }, installed: true },
       { id: 'retired', kind: 'retired', enabled: true, config: { x: 1 }, installed: false },
@@ -143,7 +143,7 @@ describe('Source registry', () => {
     expect(sources.channelAllowed({ source: 'feishu', address: { chatId: 'oc_other' } })).toBe(false)
     // A direct chat's id starts with oc_ too; the address says it is direct, and with direct messages off it gets no reply.
     expect(sources.channelAllowed(feishuChannel('oc_dm', 'om_1', true))).toBe(false)
-    expect(sources.channelAllowed({ source: 'github', address: { number: '7' } })).toBe(true)
+    expect(sources.channelAllowed({ source: 'github', address: { number: '7' } })).toBe(false)
   })
   it('delivers a reply to a direct message under the default settings', async () => {
     const sources = new SourceRegistry(() => SettingsSchema.parse({}))

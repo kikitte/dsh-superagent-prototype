@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import type { FieldSpec } from '../sources/kind.ts'
 import { usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
-import { DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
+import { Button, DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { sourceMark } from './marks.ts'
 import { usePanel, usePanelData } from './provider.tsx'
@@ -12,7 +12,7 @@ import { actorName, healthText, localized, readableMarkers, reasonLabel, valueLa
 import { CheckSetupButton, Hint, LabelValue, LoadState, SetupMessage, StatusHead, When } from './widgets.tsx'
 
 function SourceCard({ source }: { source: SourceView }) {
-  const { t, call } = usePanel()
+  const { t, call, navigate } = usePanel()
   const { running } = usePanelData()
   const { reload } = useSettings()
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -46,6 +46,7 @@ function SourceCard({ source }: { source: SourceView }) {
       {problem && <div className="dt-row-buttons">
         <p className="dt-error" role="status"><SetupMessage problem={problem} lead /></p><CheckSetupButton />
       </div>}
+      {source.id === 'github' && <Button type="button" variant="outline" onClick={() => navigate(settingsRoute('deployment'))}>{t('githubIntegration')}</Button>}
       {!source.installed && <Hint>{t('sourceNotInstalledHint')}</Hint>}
       {source.installed && source.fields.filter(spec => !spec.advanced).map(field)}
       {source.installed && advanced.length > 0 && <DisclosureRow icon={<Icon name="settings" />} title={t('advanced')} open={advancedOpen}
@@ -114,7 +115,7 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
       </div>
       {problem && <p className="dt-error">
         <SetupMessage problem={problem} lead /> <button type="button" className="dt-textlink"
-          onClick={() => navigate(settingsRoute('source', { source: source.id }))}>
+          onClick={() => navigate(setupPage(problem.place))}>
           {t('sourceOpenSettings')}
         </button>
       </p>}

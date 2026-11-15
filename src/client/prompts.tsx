@@ -57,6 +57,7 @@ function PromptsEditor({ view, reload }: { view: PromptsView; reload: () => Prom
   return <div className="dt-form">
     <div className="dt-subtabs" role="tablist" aria-label={t('promptViews')}>{tabs.map(item => <button key={item.value} type="button"
       role="tab" className="dt-subtab" aria-selected={tab === item.value} onClick={() => setTab(item.value)}>{item.label}</button>)}</div>
+    {!!view.capabilityReview?.length && <Hint>{t('promptCapabilityReview', { parts: view.capabilityReview.join(t('listSeparator')) })}</Hint>}
     {removed.length > 0 && <Hint>{t('promptRemovedParts', { parts: removed.join(t('listSeparator')) })}</Hint>}
     {tab === 'edit' && <PromptSections config={config} view={view} changed={changed} selected={selected} onSelect={select} onEdit={edit} />}
     {tab === 'full' && <FullPrompt config={config} view={view} dirty={draft.dirty} revision={draft.revision} onEdit={open} />}

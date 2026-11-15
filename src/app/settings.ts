@@ -1,5 +1,6 @@
 /** Block-scoped settings validation, optimistic concurrency saves, processing pause control, and source policy synchronization. */
 import type { Context } from '@deepseek-ai/cordis'
+import { GitHubIntegrationSchema } from '../deployment.ts'
 import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
@@ -22,7 +23,7 @@ import { validateDirectorySettings } from './directory-settings.ts'
 export class SettingsConflict extends Error {}
 const now = (): string => new Date().toISOString()
 /** Executor settings that control shell execution paths, prepare commands, and command shims. */
-const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands,
+const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.contextDirectory, executor.gitAuthor, executor.blockedCommands,
   executor.directoryPools.map(({ id, directories, prepare, recycle }) => ({ id, directories, prepare, recycle }))])
 
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
@@ -31,7 +32,12 @@ interface Block {
   merge(settings: SettingsValue, value: unknown, id: string): SettingsValue
   guard?(current: SettingsValue, candidate: SettingsValue, origin: SettingsOrigin): void
 }
-const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
+const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source' | 'integration:github', Block> = {
+  'integration:github': {
+    parse: value => GitHubIntegrationSchema.parse(value),
+    merge: (settings, value) => ({ ...settings, integrations: { ...settings.integrations, github: value as SettingsValue['integrations']['github'] } }),
+    guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
+  },
   policy: {
     parse: (value, sources) => {
       const policy = PolicyConfigSchema.parse(value)
@@ -56,7 +62,7 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
 
 /** Host dependencies used by `Settings`. */
 export interface SettingsHost {
-  readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'get' | 'directories'>
+  readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'get' | 'delete' | 'directories' | 'githubRetainedState'>
   /** Default-pool root resolution for canonical overlap validation. */
   readonly machine?: { readonly stateDir: string }
   readonly sources: SourceRegistry
@@ -107,6 +113,12 @@ export class Settings {
     if (!entry) this.syncs.set(id, entry = this.host.health.claim(`sync:${id}`))
     return entry
   }
+  private checkRepository(before: SettingsValue, after: SettingsValue): void {
+    const old = before.integrations.github.repository, next = after.integrations.github.repository
+    if (!old || old.toLowerCase() === next.toLowerCase()) return
+    const retained = this.host.store.githubRetainedState()
+    if (retained.length) throw new UserError('githubRepositoryRetained', { state: retained.join('; ') })
+  }
   /** Returns the current validated settings from `Store`. */
   current(): SettingsValue { return this.host.store.settings() }
   /**
@@ -118,6 +130,7 @@ export class Settings {
     const settings = store.settings(), revision = (block: SettingsSave) => store.blockRevision(block)
     const { rules, sources: parts } = settings.policy
     return { revision: store.get(KV.settings.revision) ?? 0,
+      integrations: { github: { revision: revision('integration:github'), read: 'settings/integration:github' } },
       pause: { revision: revision('pause'), value: { paused: settings.paused } },
       eval: { revision: revision('eval'), value: settings.eval },
       executor: { revision: revision('executor'), value: settings.executor },
@@ -135,7 +148,7 @@ export class Settings {
     const { store, sources } = this.host
     const settings = store.settings(), id = block.startsWith('source:') ? block.slice('source:'.length) : undefined
     const instance = id === undefined ? undefined : sources.instances(settings).find(item => item.id === id)
-    const value = block === 'pause' ? { paused: settings.paused } : block === 'policy' || block === 'eval' || block === 'executor' ? settings[block]
+    const value = block === 'integration:github' ? settings.integrations.github : block === 'pause' ? { paused: settings.paused } : block === 'policy' || block === 'eval' || block === 'executor' ? settings[block]
       : instance ? { enabled: instance.enabled, config: instance.config } : undefined
     if (value === undefined) throw new UserError('unknownBlock', { block })
     return { block, revision: store.blockRevision(block as SettingsSave), value }
@@ -168,6 +181,7 @@ export class Settings {
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)
+    this.checkRepository(current, candidate)
     if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.
@@ -177,7 +191,7 @@ export class Settings {
       const delivery = await sessions.delivery(`settings:${block}`)
       return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }
     }
-    const restarting = setupChanged(old, settings) || !this.host.setup.configured()
+    const restarting = setupChanged(old, settings) || JSON.stringify(old.executor.gitAuthor) !== JSON.stringify(settings.executor.gitAuthor) || !this.host.setup.configured()
     const before = policyVersion(old), after = policyVersion(settings)
     const scope = (version: SettingsValue) => ({
       scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })
@@ -187,11 +201,13 @@ export class Settings {
       // Revision, canonical identities, queued selections, leases and history are checked under the acceptance/reservation transaction lock.
       if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
       rules.guard?.(store.settings(), settings, origin)
+      this.checkRepository(store.settings(), settings)
       if (kind === 'executor') {
         validateDirectorySettings(store, store.settings().executor, settings.executor, this.host.machine?.stateDir)
         store.directories.syncInventory(settings.executor)
       }
       store.saveSettings(SettingsSchema.parse(settings), { source: origin, block, policyVersion: after, policyChanged: before !== after, notified })
+      if (block === 'integration:github') store.delete('github-integration-migration-notice')
       if (origin !== 'tool') sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
       if (before !== after) engine.policyChanged(before, after, effects)
     })

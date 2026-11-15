@@ -116,7 +116,7 @@ function seed(store: Store, accounts: Accounts = {}): void {
   const settings = store.settings()
   const { feishu: _feishu, ...others } = settings.sources
   const feishu = accounts.feishu === null ? undefined : { ...settings.sources.feishu?.config, cli: BOT(), ...accounts.feishu }
-  store.saveSettings(SettingsSchema.parse({ ...settings, sources: { ...others, github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT(), ...accounts.github } }, ...feishu ? { feishu: { enabled: true, config: feishu } } : {} } }))
+  store.saveSettings(SettingsSchema.parse({ ...settings, integrations: { github: { enabled: true, repository: 'acme/widgets', cli: AGENT(), ...accounts.github } }, sources: { ...others, github: { enabled: true, config: {} }, ...feishu ? { feishu: { enabled: true, config: feishu } } : {} } }))
 }
 let restarts: ReturnType<typeof vi.fn<() => void>>
 async function restart(machine: Partial<Machine> = {}, accounts: Accounts = {}): Promise<Runtime> {
@@ -242,7 +242,7 @@ beforeEach(async () => {
   await runtime.ready
   // Source kinds are normally registered by plugins that are not loaded in unit tests.
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
-  runtime.store.saveSettings({ ...runtime.store.settings(), policy: { ...runtime.store.settings().policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } }, eval: { ...runtime.store.settings().eval, mode: 'auto' }, sources: { github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT() } }, feishu: { enabled: true, config: { cli: BOT(), chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
+  runtime.store.saveSettings({ ...runtime.store.settings(), policy: { ...runtime.store.settings().policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } }, eval: { ...runtime.store.settings().eval, mode: 'auto' }, integrations: { github: { enabled: true, repository: 'acme/widgets', cli: AGENT() } }, sources: { github: { enabled: true, config: {} }, feishu: { enabled: true, config: { cli: BOT(), chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
   deliveries.mockClear()
 })
 afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await runtime?.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) })
@@ -858,41 +858,28 @@ it('leaves waiting and blocked assignments alone after a restart and keeps block
   expect(runtime.store.tickets.get(other.ticket.id)!.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
 })
 
-it('waits for setup without the agent\'s GitHub CLI: the panel works, and nothing is polled, assessed or dispatched', async () => {
-  const { ticket, sessionId } = await acceptedTicket()
-  await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'crashed' })
-  expect(() => runtime.checkSetup()).toThrow('Setup is complete')
-  controller.create.mockClear(); deliveries.mockClear()
-  const next = await restart({}, { github: { cli: '' } })
+it('keeps core and Feishu ready when the optional GitHub CLI fails', async () => {
+  const next = await restart({}, { github: { cli: '/missing-agent-gh' } })
   await next.ready
-  expect(next.configured()).toBe(false)
-  expect(next.setupProblem).toEqual({ place: 'github', code: 'agentCliUnset', values: {}, detail: 'The agent GitHub CLI is not set.' })
-  expect(next.health.runtime).toMatchObject({ state: 'paused', code: 'setupPending' })
-  expect(() => next.deployment).toThrow('dsh-superagent is waiting for setup: The agent GitHub CLI is not set.')
-  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problem: { place: 'github' }, accounts: null, machine: { stateDir: directory } } })
-  expect(overviewOf(next).problems[0]).toEqual({ kind: 'setup', ...next.setupProblem })
+  expect(next.configured()).toBe(true)
+  expect(next.setupProblem).toBeUndefined()
+  expect(next.setup.githubProblem).toMatchObject({ place: 'github', code: 'agentCliMissing' })
+  expect(next.deployment.github).toBeUndefined()
+  expect(next.deployment.feishu).toBeDefined()
+  expect(next.health.runtime).toMatchObject({ state: 'ready' })
+  expect((await api('GET', 'state')).body).toMatchObject({ setup: { coreReady: true, mainSessionAvailable: true, github: { status: 'error' } } })
+  next.sources.register(feishuKind); next.sources.register(githubKind)
   await receive(feishu('30', '@bot 修一下'), next)
-  // A retry waits for setup instead of launching a worker that cannot run, and no report reaches the orchestrator.
-  await next.engine.retryTicket(ticket.id)
-  expect(next.store.tickets.get(ticket.id)!.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
-  expect(controller.create).not.toHaveBeenCalled()
-  expect(deliveries).not.toHaveBeenCalled()
-  // A save that changes nothing records nothing; any other save runs setup again, since it may be the fix, and so does a
-  // check after a fix outside dsh-superagent.
-  const revision = next.store.get<number>('settings-revision')
-  expect(await next.settings.save('policy', next.store.settings().policy, next.store.blockRevision('policy'), 'panel')).toMatchObject({ saved: true, restarting: false })
-  expect(next.store.get<number>('settings-revision')).toBe(revision)
-  expect(await next.settings.save('policy', { ...next.store.settings().policy, rules: [] }, next.store.blockRevision('policy'), 'panel')).toMatchObject({ saved: true, restarting: true })
-  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
+  expect(next.engine.candidate(feishu('30', '').id)).toBeDefined()
   next.checkSetup()
-  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(2))
+  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
 })
 
 it('reports each setup problem where the operator fixes it, and checks the agent CLI the way worker shells run it', async () => {
   const needs = async (place: string, code: string, values: Record<string, string>, accounts: Accounts = {}) => {
     const next = await restart({}, accounts)
     await next.ready
-    expect(next.setupProblem).toMatchObject({ place, code, values })
+    expect(place === 'github' ? next.setup.githubProblem : next.setupProblem).toMatchObject({ place, code, values })
   }
   answers[`${AGENT()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":false}\n'
   await needs('github', 'repositoryReadOnly', { account: 'agent-bot', repository: 'acme/widgets' })
@@ -905,8 +892,8 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   const valid = { ...answers }
   // git older than 2.32 ignores GIT_CONFIG_GLOBAL and reads the operator's configuration.
   answers = { ...valid, [HELPERS]: 'file:/home/me/.gitconfig\0!gh auth git-credential\0' }
-  await needs('deployment', 'gitTooOld', {})
-  await needs('github', 'repositoryUnset', {}, { github: { repository: '' } })
+  await needs('github', 'githubGitFailed', { output: expect.any(String) })
+  await needs('github', 'agentCliMissing', { output: expect.any(String) }, { github: { cli: '/missing-gh' } })
   // A broken Feishu bot leaves Feishu out and says why; GitHub work goes on.
   answers = { ...valid, [`${BOT()} config strict-mode`]: 'strict-mode: off (source: profile)' }
   const next = await restart()
@@ -936,9 +923,9 @@ it('checks only the account a Source save changes, so a problem setup has elsewh
   expect(next.feishuProblem).toMatchObject({ code: 'feishuUserIdentity' })
   next.sources.register(feishuKind); next.sources.register(githubKind)
   answers[`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":true}\n'
-  const github = next.settings.block('source:github')
-  const value = github.value as { enabled: boolean; config: Record<string, unknown> }
-  expect(await next.settings.save('source:github', { ...value, config: { ...value.config, cli: OTHER() } }, github.revision, 'panel'))
+  const github = next.settings.block('integration:github')
+  const value = next.store.settings().integrations.github
+  expect(await next.settings.save('integration:github', { ...value, cli: OTHER() }, github.revision, 'panel'))
     .toMatchObject({ saved: true, restarting: true })
 })
 
@@ -955,8 +942,8 @@ it('lets only the panel change the execution environment, since it decides what 
 })
 
 it('checks a changed account CLI before saving it, restarts after the save, and lets only the panel change it', async () => {
-  const save = (config: Record<string, unknown>, origin: SettingsOrigin = 'panel') => runtime.settings.save('source:github',
-    { enabled: true, config: { ...runtime.store.settings().sources.github!.config, ...config } }, runtime.store.blockRevision('source:github'), origin)
+  const save = (config: Record<string, unknown>, origin: SettingsOrigin = 'panel') => runtime.settings.save('integration:github',
+    { ...runtime.store.settings().integrations.github, ...config }, runtime.store.blockRevision('integration:github'), origin)
   await expect(save({ cli: OTHER() }, 'tool')).rejects.toThrow('can only be changed in the management panel')
   answers[`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":false}\n'
   await expect(save({ cli: OTHER() })).rejects.toMatchObject({ code: 'repositoryReadOnly', values: { account: 'agent-bot' } })
@@ -965,7 +952,7 @@ it('checks a changed account CLI before saving it, restarts after the save, and 
   expect(await save({ cli: OTHER() })).toMatchObject({ saved: true, restarting: true })
   await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
   // Other fields of the Source take effect without a restart.
-  expect(await save({ pollSeconds: 120 })).toMatchObject({ saved: true, restarting: false })
+  expect(await runtime.settings.save('source:github', { enabled: true, config: { pollSeconds: 120 } }, runtime.store.blockRevision('source:github'), 'panel')).toMatchObject({ saved: true, restarting: false })
   expect(restarts).toHaveBeenCalledTimes(1)
   expect((await runtime.settings.save('executor', { ...runtime.store.settings().executor, prepare: 'true' }, runtime.store.blockRevision('executor'), 'panel')).restarting).toBe(false)
   // A save of another block during the account check is kept: the check runs first, then the save merges.
@@ -973,7 +960,7 @@ it('checks a changed account CLI before saving it, restarts after the save, and 
   await runtime.settings.save('policy', { ...runtime.store.settings().policy, rules: [] }, runtime.store.blockRevision('policy'), 'panel')
   await pending
   expect(runtime.store.settings().policy.rules).toEqual([])
-  expect(runtime.store.settings().sources.github!.config).toMatchObject({ cli: AGENT() })
+  expect(runtime.store.settings().integrations.github).toMatchObject({ cli: AGENT() })
   const feishuSave = (cli: string) => runtime.settings.save('source:feishu', { enabled: true, config: { ...runtime.store.settings().sources.feishu!.config, cli } },
     runtime.store.blockRevision('source:feishu'), 'panel')
   expect(await feishuSave('')).toMatchObject({ restarting: true })
@@ -1013,9 +1000,12 @@ it('runs setup again while the Feishu bot check failed, and restores the process
   answers[HELPERS] = 'file:/home/me/.gitconfig\0!gh auth git-credential\0'
   const broken = await restart()
   await broken.ready
-  expect(broken.setupProblem).toMatchObject({ place: 'deployment', code: 'gitTooOld' })
-  expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
-  expect(process.env.PATH?.split(':')).not.toContain(join(directory, 'worker-bin'))
+  expect(broken.setupProblem).toBeUndefined()
+  expect(broken.setup.githubProblem).toMatchObject({ place: 'github', code: 'githubGitFailed' })
+  expect(broken.configured()).toBe(true)
+  expect(broken.deployment.github).toBeUndefined()
+  expect(process.env.GIT_CONFIG_GLOBAL).toBe(workerGitConfig(directory))
+  expect(readFileSync(workerGitConfig(directory), 'utf8')).not.toContain('auth git-credential')
 })
 
 it('writes worker shims and the agent environment from the configuration only, and restores the environment on stop', async () => {
@@ -1026,7 +1016,7 @@ it('writes worker shims and the agent environment from the configuration only, a
   const next = await restart({}, { feishu: null })
   await next.ready
   expect(readdirSync(bin).sort()).toEqual(['gh', 'lark-cli', 'personal-gh'])
-  expect(readFileSync(join(bin, 'personal-gh'), 'utf8')).toContain('personal-gh is blocked in this installation; use gh, which acts as agent-bot.')
+  expect(readFileSync(join(bin, 'personal-gh'), 'utf8')).toContain('personal-gh is blocked in this installation.')
   expect(readFileSync(join(bin, 'lark-cli'), 'utf8')).toContain('lark-cli is unavailable: this installation has no Feishu bot.')
   expect(readFileSync(join(bin, 'gh'), 'utf8')).toContain(`exec '${AGENT()}'`)
   expect(readFileSync(workerGitConfig(directory), 'utf8')).toContain(`[credential "https://github.com"]\n\thelper = "${credentialHelper(AGENT())}"`)
@@ -1116,7 +1106,7 @@ it('leaves auto-merge to the delivery requirements, with the agent\'s own gh and
   const { ticket } = await acceptedTicket()
   expect(runtime.ticketEnvironment(ticket).map(variable => variable.key)).not.toContain('DSH_SUPERAGENT_GITHUB_MERGE_ACCOUNT')
   expect(ticket.mandate).not.toHaveProperty('autoMergeLineLimit')
-  const delivery = runtime.prompts.current().config.delivery
+  const delivery = runtime.prompts.skills(runtime.prompts.current().config).find(([name]) => name === 'github')![1]
   expect(delivery).toContain('it changes fewer than 200 lines (additions plus deletions);')
   // Auto-merge is never enabled as the agent account; only a merge CLI the section names enables it.
   expect(delivery).toContain('Never enable auto-merge as the agent account')
@@ -1182,7 +1172,7 @@ it('runs a GitHub-only deployment: the GitHub part of the Policy decides alone, 
 
 
 it('credits each human reviewer once in the default delivery requirements on every commit of the PR, never with an empty commit', async () => {
-  const delivery = runtime.prompts.current().config.delivery
+  const delivery = runtime.prompts.skills(runtime.prompts.current().config).find(([name]) => name === 'github')![1]
   expect(delivery).toContain('Co-authored-by: <name or login> <id+login@users.noreply.github.com>')
   expect(delivery).toContain('on every commit of the PR branch')
   expect(delivery).toContain('git filter-branch -f --msg-filter')

@@ -2,6 +2,7 @@
  * Runtime settings schemas, assessment validation, and policy gate evaluation.
  * Who may originate work is configured per Source in that Source's own identities; the Policy never maps a person across Sources.
  */
+import { GitHubIntegrationSchema } from './deployment.ts'
 import { LIMITS } from './limits.ts'
 import { z } from 'zod'
 import { ADMISSION_DEFAULTS, type Admission, type AdmissionCell, type AdmissionRow } from './admission.ts'
@@ -105,6 +106,8 @@ const DirectoryPoolSchema = z.object({
   recycle: z.string().max(LIMITS.prepareCommand).default(''),
 }).strict()
 export const ExecutorConfigSchema = z.object({
+  contextDirectory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'Absolute context directory required').default(''),
+  gitAuthor: z.object({ name: z.string().trim().min(1), email: z.string().trim().email() }).strict().nullable().default(null),
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
@@ -127,13 +130,14 @@ export const ExecutorConfigSchema = z.object({
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({
   paused: z.boolean().default(false),
+  integrations: z.object({ github: GitHubIntegrationSchema.default(() => GitHubIntegrationSchema.parse({})) }).strict().default(() => ({ github: GitHubIntegrationSchema.parse({}) })),
   sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourceInstanceSchema).default({}),
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
+export type SettingsBlock = 'integration:github' | 'policy' | 'eval' | 'executor' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 

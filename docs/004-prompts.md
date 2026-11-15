@@ -10,10 +10,10 @@ A team can edit three team sections, add skills, and override every built-in sys
 | --- | --- |
 | Communication | When to message people, how messages read, the line that begins every GitHub message (`This is by an automated agent, not a human` by default), how to handle reviews, and which ordinary accounts are review bots |
 | Ticket scope | When a Ticket goes on and when it stops with a draft |
-| Delivery requirements | Evidence in pull requests, the auto-merge condition with its line threshold, and the commit author; without one, the Executor commits as the agent account's no-reply address |
+| Delivery requirements | Evidence for the assigned local or remote deliverable. GitHub review, CI, merge and reviewer-credit rules live in the conditional GitHub skill; local commit identity is configured in Execution |
 | Team skills | Knowledge the agents load when they need it, such as an `identities` skill that says which Feishu user is which GitHub account |
 
-The built-in text covers the roles, tool usage, host mechanics, authorization rules, and the GitHub and Feishu skills. It refers to the team sections by their headings instead of repeating them.
+The built-in text covers the roles, tool usage, host mechanics and authorization rules. The GitHub skill is registered only with ready GitHub access, independently of intake; the Feishu skill requires a ready bot. A capability restart disposes old registrations before rebinding resumed Sessions. It refers to the team sections by their headings instead of repeating them.
 
 ### Built-in parts and templates
 
@@ -102,3 +102,5 @@ Acceptance records a short branch name and assignment, not a directory path. The
 - Saves name their base revision. A conflicting save is refused without discarding the draft.
 - Sessions read the latest version on every model request, including later steps in the same turn. Saving does not restart, cancel or wake a Session. The host records the revisions each Session used; an Executor can read any revision it worked under.
 - The deployment sets a total size limit, including overrides. Validation refuses unknown keys, reserved built-in skill names, unknown override parts and missing template placeholders. It never silently truncates text. An override identical to the default is removed so the part follows future defaults.
+
+Exact unchanged stock scope/delivery sections from the prior build become neutral defaults when read. Custom team text and built-in overrides are retained; the panel flags custom GitHub-dependent scope/delivery text for review while access is unavailable. Runtime guards reject unavailable operations regardless of prompt text.

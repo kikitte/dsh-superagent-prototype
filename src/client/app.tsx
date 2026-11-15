@@ -100,7 +100,9 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
 
 function Header({ masterId }: { masterId: string | undefined }) {
   const { t, call, openSession, notify } = usePanel()
-  const setupProblem = usePanelData().setup?.problem
+  const setup = usePanelData().setup
+  const setupProblem = setup?.problem
+  const mainAvailable = setup?.mainSessionAvailable === true
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<{ query: string; value: SearchView }>()
@@ -132,9 +134,9 @@ function Header({ masterId }: { masterId: string | undefined }) {
       </form>
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"
         onClick={() => setGlossary(true)} />
-      <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId || !!setupProblem}
+      <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId || !mainAvailable}
         title={setupProblem ? `${t('mainSessionWaitingSetup')} ${setupText(t, setupProblem)}` : undefined}
-        onClick={() => { if (masterId && !setupProblem) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>
+        onClick={() => { if (masterId && mainAvailable) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>
     </div>
     <Glossary open={glossary} onClose={() => setGlossary(false)} />
   </header>

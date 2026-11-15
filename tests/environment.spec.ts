@@ -36,7 +36,7 @@ describe('worker shims', () => {
     await writeEnvironment(testDeployment({ stateDir: dir, feishu: undefined }), ['personal-gh'])
     const bin = workerBin(dir)
     await expect(exec(join(bin, 'lark-cli'), ['im', '+chat-list'])).rejects.toMatchObject({ code: 1, stderr: 'lark-cli is unavailable: this installation has no Feishu bot.\n' })
-    await expect(exec(join(bin, 'personal-gh'), [])).rejects.toMatchObject({ code: 1, stderr: 'personal-gh is blocked in this installation; use gh, which acts as agent-bot.\n' })
+    await expect(exec(join(bin, 'personal-gh'), [])).rejects.toMatchObject({ code: 1, stderr: 'personal-gh is blocked in this installation.\n' })
   })
   it('keep `gh` and `lark-cli` working, and shim no `git`, when the blocked commands name the commands workers need', async () => {
     const gh = program(join(dir, 'gh-agent'), 'echo gh "$@"'), lark = program(join(dir, 'lark-bot'), 'echo lark "$@"')
@@ -195,5 +195,29 @@ describe('the repository the host\'s environment names', () => {
       for (const name of GIT_LOCATION) expect(env, name).not.toHaveProperty(name)
       expect(env.GIT_CEILING_DIRECTORIES).toBe(dir)
     } finally { vi.unstubAllEnvs() }
+  })
+})
+
+describe('GitHub-free environment', () => {
+  it('retains both HTTPS rewrites after disabling without invoking SSH or the previous helper', async () => {
+    const isolated = join(dir, 'isolated-home'), transports = join(dir, 'transports')
+    mkdirSync(isolated); mkdirSync(transports)
+    const previous = program(join(dir, 'old-agent'), `echo old-helper >> '${dir}/unexpected'; exit 1`)
+    const ssh = program(join(dir, 'ssh'), `echo ssh >> '${dir}/unexpected'; exit 1`)
+    program(join(transports, 'git-remote-https'), `echo "$2" >> '${dir}/https'; exit 1`)
+    const base = testDeployment({ stateDir: dir })
+    await writeEnvironment({ ...base, github: { ...base.github, cli: previous } }, [])
+    await writeEnvironment({ ...base, github: undefined }, [])
+    const env = workerEnv({ ...process.env, ...agentVariables(dir), HOME: isolated, GIT_EXEC_PATH: transports,
+      GIT_SSH_COMMAND: ssh, PATH: `${workerBin(dir)}:/usr/bin:/bin` })
+    for (const url of ['git@github.com:acme/widgets.git', 'ssh://git@github.com/acme/widgets.git']) {
+      await expect(exec('git', ['ls-remote', url], { cwd: dir, env, timeout: 5000 })).rejects.toBeDefined()
+    }
+    expect(readFileSync(join(dir, 'https'), 'utf8').trim().split('\n')).toEqual([
+      'https://github.com/acme/widgets.git', 'https://github.com/acme/widgets.git',
+    ])
+    await expect(exec('/bin/sh', ['-c', "printf 'protocol=https\\nhost=github.com\\n\\n' | git credential fill"], { cwd: dir, env, timeout: 5000 })).rejects.toBeDefined()
+    expect(readdirSync(dir)).not.toContain('unexpected')
+    await expect(exec(join(workerBin(dir), 'gh'), ['api', 'user'], { env })).rejects.toMatchObject({ stderr: expect.stringContaining('GitHub integration unavailable') })
   })
 })

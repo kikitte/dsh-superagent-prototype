@@ -92,14 +92,14 @@ The prepare command and Executor instructions receive the same execution variabl
 | --- | --- | --- |
 | `DSH_SUPERAGENT_DIR`, `DSH_SUPERAGENT_NAME`, `DSH_SUPERAGENT_TICKET` | Executor | The Ticket's directory, short name and id |
 | `DSH_SUPERAGENT_BLOCKED_COMMANDS` | Executor | Commands the Executor may not run |
-| `DSH_SUPERAGENT_GITHUB_REPOSITORY` | GitHub | The repository the Source watches, `owner/name` |
+| `DSH_SUPERAGENT_GITHUB_REPOSITORY` | GitHub | The ready integration repository, `owner/name`, independent of intake |
 | `DSH_SUPERAGENT_GITHUB_ACCOUNT`, `DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL` | GitHub | The agent account and its commit email |
 | `DSH_SUPERAGENT_GITHUB_NUMBER`, `DSH_SUPERAGENT_GITHUB_PR_HEAD` | GitHub | The Issue or pull request that started the Ticket, and its head ref when it is a pull request |
 | `DSH_SUPERAGENT_FEISHU_BOT`, `DSH_SUPERAGENT_FEISHU_CHAT` | Feishu | The bot, and the chat that started the Ticket |
 
 Ticket-specific values come from its directory and originating Trigger. Other values come from the current deployment settings. Only the panel can change execution environment settings; text sent to the main Session cannot change the configured shell command.
 
-Workers reach GitHub through the agent account's `gh` and Feishu through the bot's `lark-cli`. Blocked commands fail when invoked by name.
+When GitHub is ready, workers reach it through the agent account's `gh` and Feishu through the bot's `lark-cli`. Blocked commands fail when invoked by name.
 
 These wrappers and directories establish defaults, not a security boundary. A worker can still execute a program by absolute path.
 
@@ -227,3 +227,7 @@ An Eval in progress does not expire during a pause; its deadline moves later by 
 ### Invalid configuration
 
 A stored Source configuration that its kind rejects disables that Source instance.
+
+GitHub access and automated Source monitoring are independent. Identity variables are available with ready access even when intake is off or the Source plugin is absent; unavailable identity variables are cleared from subprocess environments. Automatic PR discovery, CI and merge/close observation require the installed enabled Source. Disabling access preserves bindings, subscriptions and leases and pauses observation. A ready local Ticket without lifecycle-bound Threads completes without a PR.
+
+`executor.contextDirectory` is a separate read-only admission baseline, never the operator cwd or a prepared Ticket directory. `executor.gitAuthor` explicitly configures local author name/email. Without it or a ready suggested GitHub identity, a requested commit needs an author; file-only work still proceeds. Confirmed ordinary directories require no Git subprocess for verification; markers, ancestor checkouts, bare repositories and unknown inspection results remain fail-closed.

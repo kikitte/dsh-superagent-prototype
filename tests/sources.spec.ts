@@ -26,7 +26,7 @@ import { join } from 'node:path'
 const MEMBER = 'ou_alice'
 function host(overrides: Partial<SourceContextDeps> = {}) {
   const store = new Store(join(mkdtempSync(join(tmpdir(), 'sources-')), 'db.sqlite'))
-  const settings = SettingsSchema.parse({ policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }], syncChat: 'oc_team' }, github: { allowed: [{ id: 'alice' }] } } }, eval: { mode: 'auto' }, sources: { feishu: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }, { chatId: 'oc_observed', listen: 'all' }], directMessages: true } } } })
+  const settings = SettingsSchema.parse({ integrations: { github: { enabled: true, repository: 'acme/widgets', cli: '/bin/false' } }, policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }], syncChat: 'oc_team' }, github: { allowed: [{ id: 'alice' }] } } }, eval: { mode: 'auto' }, sources: { github: { enabled: true, config: {} }, feishu: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }, { chatId: 'oc_observed', listen: 'all' }], directMessages: true } } } })
   store.saveSettings(settings)
   const board = new HealthBoard()
   const sources = new SourceRegistry(() => store.settings(), board)
@@ -1024,7 +1024,7 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(1, 3, eof)).toBeUndefined()
   expect(pollFailure(2, 3, eof)).toBeUndefined()
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
-  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, observeIssues: false,
+  expect(githubKind.schema.parse({})).toEqual({ pollSeconds: 60, failuresBeforeError: 3, observeIssues: false,
     observePulls: false, observeComments: false, observeCi: false })
 })
 describe('feishu event consumer', () => {
@@ -1065,7 +1065,7 @@ describe('feishu event consumer', () => {
   /** The Feishu Source's context, on a fresh Store whose Feishu Source is on, with `cli` as the bot CLI. */
   function consumerSource(path: string, config: Record<string, unknown> = { chats: [] }) {
     const store = new Store(join(dir, 'db.sqlite'))
-    store.saveSettings(SettingsSchema.parse({ sources: { feishu: { enabled: true, config } } }))
+    store.saveSettings(SettingsSchema.parse({ sources: { github: { enabled: true, config: {} }, feishu: { enabled: true, config } } }))
     const board = new HealthBoard()
     const sources = new SourceRegistry(() => store.settings(), board)
     sources.register(feishuKind)
@@ -1079,7 +1079,7 @@ describe('feishu event consumer', () => {
     const commands = new Commands(() => deployment, {}, controller.signal)
     const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment, ready: Promise.resolve(), configured: () => true,
       receive: (trigger: Trigger) => engine.receive(trigger) }
-    const turnOff = () => store.saveSettings(SettingsSchema.parse({ sources: { feishu: { enabled: false, config: { chats: [] } } } }))
+    const turnOff = () => store.saveSettings(SettingsSchema.parse({ sources: { github: { enabled: true, config: {} }, feishu: { enabled: false, config: { chats: [] } } } }))
     return { ctx: sourceContextOf(deps, feishuKind), health, store, turnOff }
   }
 

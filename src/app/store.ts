@@ -6,7 +6,7 @@ import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, t
   type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
-import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.ts'
+import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo12, githubOptionalSettings, tooOld } from './migration.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
 import { DirectoryStore } from './directory-store.ts'
@@ -54,7 +54,7 @@ export class Store implements Repositories {
   readonly db: DatabaseSync
   readonly directories: DirectoryStore
   /**
-   * Opens or creates the SQLite database at `path`, migrating schema 10 to schema 11 in a single transaction.
+   * Opens or creates the SQLite database at `path`, migrating schemas 10/11 to schema 12 in a single transaction.
    * @param report - Receives errors thrown by `afterCommit` callbacks without failing the committed transaction.
    * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (11), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
    */
@@ -89,7 +89,8 @@ export class Store implements Repositories {
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
           `)
           this.addColumns()
-          if (migrating) migrateTo11(this)
+          if (version !== undefined && version < 11) migrateTo11(this)
+          if (version !== undefined && version < 12) migrateTo12(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {
@@ -187,8 +188,19 @@ export class Store implements Repositories {
 
   /** Versioned settings snapshots; the current settings are the snapshot of the latest revision. */
   private readonly settingsVersions = new Versions<SettingsVersion>(this, KV.settings.revision, KV.settings.version)
+  /** Retained single-repository identities that make interpreting old numeric GitHub references against another repository unsafe. */
+  githubRetainedState(): string[] {
+    const exists = (table: string, path: string) => !!this.db.prepare(`SELECT 1 FROM ${table} WHERE value ->> '${path}' = 'github' LIMIT 1`).get()
+    return [
+      ...exists('trigger', '$.source') ? ['Triggers'] : [],
+      ...exists('thread', '$.ref.source') ? ['Threads, including resumable subscriptions'] : [],
+      ...this.tickets.list().some(ticket => ticket.mandate.actor.source === 'github' || ticket.channels.some(channel => channel.source === 'github') || ticket.follows?.some(follow => follow.thread.startsWith('github:'))) ? ['Tickets/PR bindings, including ended Tickets'] : [],
+      ...this.keys('github-').some(name => name !== 'github-integration-migration-notice') ? ['polling cursors/state'] : [],
+      ...exists('outbox', '$.channel.source') ? ['deliveries'] : [],
+    ]
+  }
   /** Current validated settings. */
-  settings(): Settings { return SettingsSchema.parse(this.settingsVersions.current()?.settings ?? {}) }
+  settings(): Settings { return SettingsSchema.parse(githubOptionalSettings(this.settingsVersions.current()?.settings ?? {})) }
   /** Revision of one settings block; each configuration page saves against its own block for optimistic concurrency. */
   blockRevision(block: SettingsSave): number { return this.get(KV.settings.block(block)) ?? 0 }
   /** Saves settings as the next revision (making it current) and increments `record.block`'s revision counter when present. */
@@ -202,7 +214,7 @@ export class Store implements Repositories {
     })
   }
   /** Saved settings revisions, newest first; revisions predating settings history are absent. */
-  settingsHistory(limit = 20): SettingsVersion[] { return this.settingsVersions.list(limit) }
+  settingsHistory(limit = 20): SettingsVersion[] { return this.settingsVersions.list(limit).map(version => ({ ...version, settings: (SettingsSchema.safeParse(githubOptionalSettings(version.settings)).data ?? version.settings) })) }
 
   readonly triggers = {
     get: (id: string): Trigger | undefined => { const row = this.db.prepare('SELECT value FROM trigger WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Trigger : undefined },

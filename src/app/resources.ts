@@ -1,4 +1,5 @@
 /** Serves paginated context resources to orchestrator_read so large bodies stay out of model prompts until requested. */
+import { requireGitHub } from '../deployment.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-query'
 import { UserError, key, latestReport, reached, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
@@ -47,7 +48,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'settings', holds: 'settings by block, each with the revision a save names: the small blocks whole, the Policy and the Source '
     + 'instances summarized' },
   { name: 'settings/<block>', holds: 'one settings block whole, as orchestrator_settings_save takes it: policy, eval, executor, pause or '
-    + 'source:<id>' },
+    + 'source:<id> or integration:github (operator-only)' },
   { name: 'prompts', holds: 'the prompt revision each Session reads, the skills, and the saved versions' },
   { name: 'prompts/<revision>', holds: 'one prompt version by number, or current, the one the Session works under', executor: true },
   { name: 'prompts/defaults', holds: 'the built-in prompt configuration, and the built-in parts by the key an override names' },
@@ -57,7 +58,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
   { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
 ]
-export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(resource => !executor || resource.executor)
+export const resourceGrammar = (executor: boolean, github = false): string => RESOURCES.filter(resource => (!executor || resource.executor) && (github || !resource.name.startsWith('github/')))
   .map(resource => `${resource.name}: ${resource.holds}`).join('; ')
 
 export interface ResourceHost {
@@ -222,7 +223,7 @@ const ROUTES: readonly Route[] = [
     const commands = read.host.commands.withSignal(read.signal)
     return sourcePage(read, 'feishu', () => feishuRead(commands, ref, read.resource, read.host.feishuPageSize()))
   }],
-  ['github/', read => sourcePage(read, 'github', () => readGithub(read.host.commands.withSignal(read.signal), read.resource))],
+  ['github/', read => { requireGitHub(read.host.commands.deployment); return sourcePage(read, 'github', () => readGithub(read.host.commands.withSignal(read.signal), read.resource)) }],
   ['trigger/', async read => {
     const { host, rest, ticketId, offset, signal } = read
     if (!rest || rest.includes('/')) throw new Error('Unknown context resource')

@@ -29,7 +29,7 @@ export interface Machine {
   admissionContextTimeoutMs: Volatile<number>
 }
 const MOVED: Record<string, string> = {
-  repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
+  repository: 'in integration:github', branchPrefix: 'in the prepare command of the Execution settings', github: 'in integration:github',
   feishu: 'on the Feishu Source', author: 'prompt text', repositoryPath: 'in the prepare command of the Execution settings',
   worktreeRoot: 'the ticket directory of the Execution settings', blockedCommands: 'in the Execution settings',
 }
@@ -46,13 +46,27 @@ export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
 })
+export const GitHubIntegrationSchema = GithubAccountsSchema.extend({ enabled: z.boolean().default(false) }).strict()
+  .superRefine((value, ctx) => {
+    if (value.enabled && (!value.repository || !value.cli)) ctx.addIssue({ code: 'custom', message: 'Enabled GitHub requires repository and cli in integration:github' })
+  })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { feishu: Object.keys(FeishuBotSchema.shape) }
 
+export interface GitHubDeployment { repository: string; cli: string; login: string; noreply: string }
+/** Structured failure raised before any unavailable GitHub operation starts. */
+export class IntegrationUnavailable extends Error {
+  readonly code = 'integrationUnavailable'
+  readonly integration = 'github'
+  constructor(detail = 'Enable and check GitHub in Settings → Deployment.') { super(`GitHub integration unavailable. ${detail}`) }
+}
+export function requireGitHub(deployment: Pick<Deployment, 'github'>): GitHubDeployment {
+  if (!deployment.github) throw new IntegrationUnavailable()
+  return deployment.github
+}
 export interface Deployment extends Machine {
-  repository: string
-  github: { cli: string; login: string; noreply: string }
+  github?: GitHubDeployment
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
@@ -102,7 +116,7 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  return { ...machine, github: { repository, cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

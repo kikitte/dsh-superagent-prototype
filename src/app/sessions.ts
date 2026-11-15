@@ -135,7 +135,7 @@ export class Sessions {
         presets.select(agent, ours).catch(() => {})
       })
     })
-    this.listeners.push(() => { void presetScope.dispose().catch((error: unknown) => { ctx.logger.warn('Could not release preset listeners: %s', String(error)) }) })
+    this.listeners.push(() => { void Promise.resolve(presetScope.dispose()).catch((error: unknown) => { ctx.logger.warn('Could not release preset listeners: %s', String(error)) }) })
     this.listeners.push(ctx.on('agent/status', ({ agent, status }) => {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     }))
@@ -268,7 +268,7 @@ export class Sessions {
       binding.skills = undefined
       this.bindSkills(binding, host.prompts.current())
     })
-    binding.disposers.push(() => { skillScope.dispose().catch((error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release a skill scope: %s', String(error)) }) })
+    binding.disposers.push(() => { void Promise.resolve(skillScope.dispose()).catch((error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release a skill scope: %s', String(error)) }) })
     await skillScope
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
@@ -366,7 +366,9 @@ export class Sessions {
   }
   /** Releases prompt sections, skills, and tools registered by `Sessions` across all decorated agents. */
   dispose(): void {
-    for (const dispose of this.listeners.splice(0)) dispose()
+    for (const dispose of this.listeners.splice(0)) {
+      try { dispose() } catch (error) { this.ctx.logger.warn('Could not release Session listeners: %s', String(error)) }
+    }
     for (const agent of [...this.bindings.keys()]) this.release(agent)
   }
 }

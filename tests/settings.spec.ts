@@ -57,14 +57,13 @@ it('refuses a save of a block that another save changed during its model or acco
   // An account check that a save of the same Source outruns is refused the same way.
   const accounts = deferred<void>()
   vi.spyOn(Setup.prototype, 'checkAccounts').mockImplementationOnce(() => accounts.promise)
-  const github = settings.block('source:github')
-  const value = github.value as { enabled: boolean; config: Record<string, unknown> }
-  const moved = settings.save('source:github', { ...value, config: { ...value.config, cli: '/opt/bin/gh-other' } }, github.revision,
-    'panel')
-  await settings.save('source:github', { ...value, config: { ...value.config, pollSeconds: 90 } }, github.revision, 'panel')
+  const github = settings.block('integration:github')
+  const value = github.value as { enabled: boolean; repository: string; cli: string }
+  const moved = settings.save('integration:github', { ...value, cli: '/opt/bin/gh-other' }, github.revision, 'panel')
+  await settings.save('integration:github', { ...value, enabled: false, cli: '/other-draft' }, github.revision, 'panel')
   accounts.resolve()
   await expect(moved).rejects.toThrow(SettingsConflict)
-  expect(store.settings().sources.github!.config).toMatchObject({ cli: value.config.cli, pollSeconds: 90 })
+  expect(store.settings().integrations.github).toEqual({ ...value, enabled: false, cli: '/other-draft' })
 })
 
 it('refuses a Policy sync that a Policy save outran, reports it on sync:feishu, and keeps the save', async () => {
