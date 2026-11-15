@@ -194,11 +194,27 @@ Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself 
 
 That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries.
 
+### Directory placement and ownership
+
+Acceptance calls `EngineOptions.validatePlacement` inside the Engine transaction, after replay resolution. `PlacementContexts` retains immutable semantic snapshots (instructions, their revision, pool IDs/descriptions) in SQLite. The Ticket records the exact selection and snapshot; execution metadata has a branch identifier and assignment text but no directory until launch admission.
+
+`Store.directories` is an Executor-owned `DirectoryStore`: durable FIFO requests, canonical directory identities, permanent Ticket affinity, monotonic acquisition sequences, preparation evidence, released lease history and Git working-tree claims. Partial SQL unique indexes enforce one unreleased lease per directory/Ticket and one owner per canonical Git root/worktree-specific metadata identity. Reservation atomically persists all claims, affinity, usage and preparation intent before filesystem work. Releases keep history and release subordinate claims in the same transaction.
+
+`DirectoryManager` is owned by `DshExecutor`. A worker slot is reserved synchronously before directory admission. Fixed inventory filters Git/occupancy/ownership blockers then uses LRU; pinned resumptions never substitute a directory. Default creates a fresh non-clobbering path and prospective independent Git-root claim without inventory occupancy or cleanliness gates. A semantic root change affects only first reservations. Durable preparation completion, not path existence, authorizes execution. Failed/interrupted hooks retain ownership and are not blindly replayed. Preparation/recycling hooks await the subprocess handle's full-range `waitForExit`, not merely the direct shell's `done`; that process-local proof is not restart recovery evidence. Termination queues `directoryRelease`; waiting, handoff, Assignment replacement and Runtime shutdown do not release leases.
+
+Read-only `inspectGit` distinguishes missing/non-Git, clean, dirty, unfinished and unknown. Linked worktrees use distinct roots/metadata, while sibling registrations share one exclusive Git root. Preparation and execution revalidate identity independently of clean-for-reuse checks. Fixed recycling needs preservation and a clean Git result; default contents stay dedicated and retained.
+
+**Integration limitation:** `DirectorySafety` defines trusted host `DirectoryAdmission` and `ProcessOwner` boundaries, retrieved as optional `executionDirectorySafety`. No production provider/host-client bridge ships here. DSH 0.2.2-rc.3 running events are post-admission; client `mainView` is local data retention, not authoritative rendered-view presence. Thus fixed inventory remains unknown/unusable without a supported shared coordinator. Default does not depend on it. The required production coordinator must cover all allowed runtimes/clients, serialize Session starts/workspace/view transitions with reservation and work admission, fence/await managed conflicts without stopping external work, and preserve queued messages; a poll/pre-step callback is insufficient.
+
+The directory manager fences all old-epoch unreleased leases before managed restoration. Recovery/release after managed activity requires independently verified old-range quiescence (hooks and every descendant included), not missing jobs, elapsed time or host death. Without a process-owner provider/evidence, ownership remains quarantined with no slot. Interrupted preparation/recycling also requires reconciliation; neither existence nor an operator acknowledgement clears uncertainty. Current worker pre-step/tool guards prevent managed access through stale ownership; complete host-level pre-input admission and direct-message parking remain integration work. This is a partial implementation of the leasing plan, not completed end-to-end shared-directory support.
+
+Startup recovery and the operator's `POST directory-leases/<id>/recheck-recovery` share `DirectoryManager.recheckRecovery`: the trusted process-owner provider proves the reviewed range empty, then the manager compares the complete fenced lease snapshot before recording clearance in its current epoch. Stale epochs, concurrent lifecycle changes, duplicate asynchronous proofs and shutdown reject the result. A cleared fence cannot accept a replayed proof. Missing owner/provider/proof retains ownership; clearance retains interrupted-effect failures and wakes only the Executor through the management route. Diagnostics expose the epoch, owner, evidence and remaining reconciliation errors. There is still no production process-owner provider or operator filesystem-effect reconciliation workflow.
+
 ### DshExecutor
 
 `DshExecutor` (`src/executor/dsh.ts`) provides one Session and directory per Ticket. `start` and `deliver` enqueue `launch` and `delivery` effects. `stop` cancels the turn through `Store.afterCommit`, so a rolled-back end does not stop the worker.
 
-`prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: short name, directory and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id.
+`prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: branch short name and `ticketExecution` assignment text, without a directory pathname. The directory manager reserves affinity at launch admission. `workerSessionId(ticket.id)` derives the Session id.
 
 `WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
 
@@ -319,6 +335,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
+| `src/core/directories.ts` | Pool placement, directory lease/affinity and exclusive Git working-tree contracts |
+| `src/app/placement.ts` | Immutable semantic placement snapshots, instruction revisions and stale acceptance validation |
+| `src/app/directory-store.ts` | Durable directory identities, FIFO queues, leases, affinity, resource claims and usage sequence |
+| `src/app/directory-settings.ts` | Canonical path and atomic registration/lifecycle validation |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
 | `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
 | `src/app/effects.ts` | Effects |
@@ -352,6 +372,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
+| `src/executor/directories.ts` | Executor-owned allocation, durable preparation, affinity, release and recovery fencing |
+| `src/executor/directory-safety.ts` | Trusted occupancy/admission and process-owner integration contracts, unknown fail-closed state |
+| `src/executor/git.ts` | Read-only canonical working-tree identity and whole-tree clean-for-reuse probes |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
@@ -403,6 +426,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Test | Covers |
 | --- | --- |
+| `tests/placement.spec.ts` | Immutable semantic snapshots, required placement, stale/refused acceptance and replay audit |
+| `tests/directory-settings.spec.ts` | Canonical inventory validation, lifecycle restrictions and retirement |
+| `tests/directory-leasing.spec.ts` | Policy-specific allocation, LRU, affinity, Git claims, preparation and conservative recovery/release |
+| `tests/directory-crash.spec.ts` | Isolated allocator SIGKILL/reopen at reservation, preparation, execution and release for both policies; retained claims/affinity and fail-closed quarantine, without claiming supervisor/descendant containment validation |
+| `tests/directory-store.spec.ts` | SQL ownership constraints, transactional rollback, durable queue/history and ownership regressions |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
@@ -445,7 +473,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
-`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
+`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`. `directory-crash.ts` is an isolated allocator process killed without graceful disposal or a SQLite close by the crash tests; its phase-entry adapter is test-only and supplies no restart recovery evidence.
 
 ## Persistence
 

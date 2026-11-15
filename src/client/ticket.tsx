@@ -150,6 +150,7 @@ export function TicketPage({ id }: { id: string }) {
     {data.actions.retry && data.summary && <p className={`dt-banner${failed ? ' dt-danger' : ''}${failedText ? ' dt-mono' : ''}`}>
       <span className="dt-banner-label">{t(failed ? 'failedPrefix' : 'blockedPrefix')}</span>{data.summary}
     </p>}
+    {data.directoryWait && <p className="dt-banner"><span className="dt-banner-label">{t('directoryWait')}{t('labelSeparator')}</span>{data.directoryWait}</p>}
     {data.deliveryError && <p className="dt-banner dt-danger dt-mono">
       <span className="dt-banner-label">{t('deliveryFailedPrefix')}</span>{data.deliveryError}
     </p>}
@@ -163,6 +164,20 @@ export function TicketPage({ id }: { id: string }) {
         context={thread.context} />)}</ul>
     </Section>}
     <div className="dt-details">
+      {data.placement && <Details icon="hash" title={t('ticketDirectoryPlacement')}>
+        <KeyValues rows={[
+          [t('poolId'), data.placement.poolId],
+          [t('placementReason'), data.placement.reason],
+          [t('placementContextVersion'), <code>{data.placement.contextVersion}</code>],
+          ...data.placementContext ? [[t('placementInstructionRevision'), <code>{data.placementContext.instructionRevision}</code>] as [string, ReactNode]] : [],
+          [t('directoryAffinity'), data.directoryAffinity ? `${data.directoryAffinity.directoryId} · ${data.directoryAffinity.path}` : t('directoryNotReserved')],
+        ]} />
+        {data.directoryLeases?.map(lease => <div key={lease.id} className="dt-form dt-block">
+          <KeyValues rows={[[t('directoryLease'), <code>{lease.id}</code>], [t('directoryLeaseState'), `${lease.state} · ${lease.recovery}`],
+            [t('directoryPreparation'), lease.preparation.state], [t('directoryReleased'), lease.releasedAt ?? t('directoryStillHeld')]]} />
+          {(lease.error || lease.preparation.error) && <p className="dt-error">{lease.error ?? lease.preparation.error}</p>}
+        </div>)}
+      </Details>}
       {/* A single Assignment adds nothing beyond the status line; list Assignments only once work has been resumed or handed over. */}
       {data.assignments.length > 1 && <Details icon="queue" title={`${t('term.assignment')} · ${data.assignments.length}`} open><Assignments
         ticket={data} /></Details>}
@@ -183,7 +198,7 @@ export function TicketPage({ id }: { id: string }) {
         <InputList inputs={data.inputs.filter(input => input.delivered)} />
       </Details>}
       <Details icon="hash" title={t('identifiers')}>
-        <KeyValues rows={[[t('ticketId'), <span className="dt-mono">{data.id}</span>], [t('executionDirectory'), <span
+        <KeyValues rows={[[t('ticketId'), <span className="dt-mono">{data.id}</span>], [t('directoryPath'), <span
           className="dt-mono">{data.directory ?? t('empty')}</span>],
           ...legacy && data.mandate.scope ? [[t('legacyAssignment'), <span
             className="dt-mono dt-clamp">{data.mandate.scope}</span>] as [string, ReactNode]] : []]} />

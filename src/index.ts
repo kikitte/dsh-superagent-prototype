@@ -25,3 +25,4 @@ export async function apply(ctx: Context, config: DeploymentConfig): Promise<voi
 }
 export type { Deployment, DeploymentConfig } from './deployment.ts'
 export * from './core/index.ts'
+export type { DirectoryAdmission, DirectorySafety, Occupancy, ProcessOwner } from './executor/directory-safety.ts'

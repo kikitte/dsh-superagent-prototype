@@ -22,7 +22,9 @@ An `idle` Ticket has finished its turn without an outstanding question. A Trigge
 
 ## The Executor
 
-Each Ticket gets an Executor Session named `worker-<ticket id>` and a directory named after the Ticket's short name. Directories are created under the configured execution root, which defaults to `<stateDir>/work`.
+Each Ticket gets an Executor Session named `worker-<ticket id>`. Acceptance records its short name, assignment text and version-bound pool placement, but no directory until launch reservation. The main Session selects a pool from operator-authored semantic instructions and pool IDs/descriptions; it does not select paths, inspect inventory/eligibility/worker slots or change placement while a Ticket waits. A stale placement context refuses new acceptance atomically; an accepted replay returns the original Ticket and decision even after settings change.
+
+Operator-configured pools supply **fixed inventory** of registered directory IDs/absolute paths. The built-in reserved **`default`** pool always exists and supplies **per-Ticket creation**: a fresh dedicated directory beneath its root, defaulting to `<stateDir>/work`. A short name remains a branch identifier and need not equal a fixed directory basename. No matching operator pool means semantic selection of `default`, not fallback because another selected pool is empty or blocked. Workers cannot choose or change placement.
 
 Executor Sessions run commands without approval as the operator's OS user. Their `dsh-superagent-worker` preset contains the tools needed for work and moves foreground shell commands to background jobs after 5 seconds. This lets a worker receive new messages at the next step instead of waiting for a long command to finish.
 
@@ -42,15 +44,37 @@ A person can also start a turn by writing directly in the Executor Session. Its 
 
 When an Assignment ends, its shell jobs are killed without waking the Session. Its subagents are released, and any completion turns they wake are dropped. The replacement Assignment and its waiting Inputs start after that shutdown finishes.
 
-Stopping or restarting the plugin inside the DeepSeek Harness process uses the same shutdown path. Inputs not yet taken into Session history are retained. Shutdown waits up to 10 seconds for each worker's background work; a process restart ends that work outright. An Assignment interrupted while busy restarts with a recovery note.
+Stopping or restarting the plugin inside the DeepSeek Harness process requests the same managed shutdown path. Inputs not yet taken into Session history are retained. Process-local cancellation or an empty job registry does not prove every subprocess descendant stopped. Leases remain held through shutdown; prior-epoch ownership is recovery-fenced on startup and cannot prepare, execute, recycle or release until external process-owner quiescence evidence and interrupted-effect reconciliation establish safety. A recovery note alone is not that evidence.
 
 Worker subagents, including nested ones, use DeepSeek Harness's `standard` preset with the worker's permissions. They retain only the worker's allowed work tools, and lose those tools when the Ticket ends. Under `standard`, a shell command moves to the background after 60 seconds. A subagent's jobs are killed when it ends.
 
-### Preparing a Ticket directory
+### Reserve, create and prepare
 
-Before the first Assignment, if the Ticket directory does not exist, the prepare command runs once with `sh` in the execution root. It has ten minutes to finish. Without a prepare command, the worker starts in an empty directory.
+The order is **select a pool → reserve a directory/acquire its lease → create if needed → prepare contents → execute → stop activity → preserve/recycle → release**. Freeing a worker slot, releasing a lease and deleting a directory are different operations.
 
-A failed command fails the Ticket and records its output. A retry or a person's message on one of the Ticket's Threads tries preparation again. A typical command uses `git worktree` to create a checkout. A pull request belongs to the Ticket when its branch's last path segment matches the Ticket's short name.
+For first fixed-inventory reservation, the Executor filters eligible candidates and chooses least recently used by last committed lease-acquisition sequence: never-used first, then stable directory-ID tie-breaking. Successful acquisition, including resumption, advances that sequence atomically; failed attempts/releases do not. With affinity, it waits for that exact directory, never substitutes another one or preempts its current owner.
+
+For first `default` reservation, it chooses a nonexistent path based on the short name, disambiguating collisions before committing. Existing paths are not adopted or overwritten. Reservation durably records affinity, lease, prospective Git claim and preparation intent **before** filesystem effects. A crash between reservation and creation retains the same path. An unexpected path appearing after reservation is a remediation conflict, not permission to allocate another path.
+
+The `default` prepare command runs with `sh` in the default-pool root while its reserved target is absent; it must create that exact path non-clobberingly. With an empty hook, the Executor exclusively creates an empty directory. A checkout/worktree must be independent at the claimed path; borrowing an ancestor working tree is rejected, including for an empty directory beneath a repository. Retries/resumption retain the directory and the Ticket's own uncommitted work; they do not apply fixed-inventory clean-for-reuse or external Session presence gates.
+
+Fixed preparation runs inside the registered directory for each new lease, creating the directory first if needed, and restores the requesting Ticket's workspace contents safely. Hooks are operator configuration; model placement text cannot supply commands. Preparation has durable intent/start/completion/failure evidence, so path existence is not proof it finished. Failure retains ownership and output. Interrupted or failed filesystem effects require reconciliation; a retry never blindly replays a creation/preparation hook or changes affinity. A typical default command uses `git worktree` to create its independent checkout. A pull request belongs to the Ticket when its branch's last path segment matches the Ticket's short name.
+
+### Fixed-inventory eligibility and deployment limits
+
+A candidate must have verified canonical identity and filesystem/recycling readiness; no overlapping unreleased directory lease, Git working-tree claim or recovery fence; authoritative external Session clearance; and clean Git state for acquisition/reuse when it belongs to a working tree. Resolve symlinks and directory boundaries, not string prefixes. Git inspection includes the entire resolved working tree, untracked files, staged/unstaged/conflicted and submodule changes, plus unfinished operations; unreadable, malformed or failed probes are unknown, not clean. Never automatically discard, clean, stash or commit pre-existing changes to obtain eligibility. Under the same unreleased lease, the Ticket's own edits are expected and do not make ordinary retries/turns fail a clean-for-reuse gate.
+
+The lease also claims its Git working-tree root and worktree-specific metadata across every pool. `/repo/ui` and `/repo/api` share `/repo` and cannot execute concurrently; distinct linked worktrees may, despite common object storage. Verify identity again before preparation, turn admission and recycling. Unexpected identity changes fence activity rather than silently claiming another owner's tree.
+
+For fixed inventory, an unrelated Session blocks overlapping canonical workspaces or the same Git working-tree resource while running, displayed in any live client Session view, or owning outstanding background activity. Persisted/loaded Sessions, sidebar entries, retained main-view data, focus loss and API reads do not by themselves mean displayed presence. Across tabs/clients, closing one view does not clear others; stopping a turn does not clear a still-displayed view. Unknown startup/reconnect/disconnect observations stay unknown until reconciled. Reservation/use must serialize with conflicting starts/workspace changes/view openings; a one-time poll is insufficient.
+
+**The production authoritative observation/coordinated-admission adapter is not provided yet. Fixed-inventory execution stays `unknown`/unusable without it; configuration/CRUD alone does not enable safe reuse.** This is an operator diagnostic, not a main-Session placement failure, and does not block `default`. One database's directory/Git claims do not cover other profiles/processes/installations: shared fixed workspaces require shared authoritative observation/admission across all of them, otherwise that deployment topology is unsupported. Never kill unrelated work or close user views to obtain a directory.
+
+### Lease lifetime and safe release
+
+A lease belongs to a Ticket, not its Assignment or worker slot. It remains held through waiting, review, blocked/failed work, retries and runtime shutdown. Every unreleased state (`reserved`, `preparing`, `active`, `releasing`) excludes other owners. An active lease proves preparation finished, not worker execution or recovery clearance.
+
+Ending queues asynchronous stopping, required preservation/recycling and atomic directory/Git-claim release. Fixed recycle hooks preserve required state and must leave reusable Git workspaces clean; missing hooks or failed/unknown checks do not justify discarding artifacts or freeing ownership. `default` preserves dedicated contents without reuse gates. Lease release is not deletion. Affinity survives release: an ended Ticket resumes only in its original directory after normal authorization checks and safe reacquisition/restoration. Retiring a registration retains its identity/history; an unavailable original directory requires operator remediation rather than substitution.
 
 ### Concurrency
 
@@ -58,7 +82,7 @@ A Ticket holds a worker slot from the start of a launch, including preparation, 
 
 The configured concurrency limit applies to these slots, with one extra slot for a person's message or a status request. Such a wake can use the extra slot when normal slots are full, and takes the next free slot before a new launch. New work therefore cannot prevent a person from continuing an existing Ticket.
 
-Other Inputs, such as CI results, wait for a normal slot. A launch waits in `working / queued` until a slot is free. Launches run concurrently, so a slow prepare command delays only its own Ticket.
+Other Inputs, such as CI results, wait for a normal slot. A launch waits in `working / queued` until a worker slot and its policy-specific directory admission are available. No worker slot is held merely while waiting for directory eligibility, exact affinity, a Git resource or a recovery fence; a committed lease may remain held without a worker slot. Launches run concurrently, so a slow prepare command delays only its own Ticket. Neither directory availability nor the worker limit triggers pool reselection.
 
 ### Execution variables
 
@@ -143,9 +167,11 @@ A retry ends the current Assignment and starts a new one in the same Executor Se
 The Executor model applies only when a Session is created; an existing Session keeps its model.
 ### Restart
 
-Running Assignments end with "host restarted" and new ones start with a recovery note that tells the Executor to check its directory, git history and GitHub before repeating any outside action, oldest Ticket first.
+Before restoring managed Sessions or dispatching filesystem effects/worker turns, startup fences every prior-epoch unreleased lease, including `active` ones. It retains the accepted pool, affinity, queue, preparation evidence and exclusive Git resource. Lease lifecycle state alone does not clear recovery. Quarantined directories hold ownership but no worker slot; old-epoch callbacks cannot release or mutate later ownership.
 
-Assignments that are waiting, ready, blocked or failed stay as they are, unless an Input reached them after that Report, in which case they start again too.
+Recovery requires an external supervisor/OS process owner containing all managed descendants (including prepare/recycle hooks), or an equivalent supported durable owner, to prove the old execution range empty. It must also reconcile interrupted filesystem effects before use. Host exit, lost handles, elapsed time or an empty DSH process-local job registry are not proof. **No production process-owner evidence adapter is currently installed by this bundle, so affected leases stay quarantined rather than automatically restarting safely.** An operator must establish verified cleanup through that trusted mechanism; an acknowledgement or registration edit is not evidence.
+
+After recovery clearance, interrupted running Assignments may be replaced with recovery notes reminding the Executor to check its directory, Git history and GitHub before repeating outside actions. Waiting, ready, blocked or failed Assignments otherwise retain their Reports unless later Inputs require continuation. These notes preserve work context; they never replace ownership/quiescence checks.
 
 Sessions, directories, Subscriptions, pending messages and the stored work below survive a restart, and so does the record of which messages each Executor Session took into its history, which a step does once it claimed them and before its model call: a message taken by a turn the restart cut off counts as read once a Report or the end of a turn follows, while one a step claimed but a cancel or error cut off before the history counts as unread.
 

@@ -30,6 +30,12 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 
+## Execution directory placement
+
+Acceptance records a versioned semantic pool choice, not a pathname. The built-in `default` pool reserves a fresh dedicated directory at launch; optional fixed-inventory pools retain their selection while waiting for an eligible directory. Ticket directory affinity survives release, and worker slots are independent of directory leases and exclusive Git working-tree claims.
+
+**Integration status:** on DSH `0.2.2-rc.3`, fixed inventory is deliberately unavailable without authoritative cross-runtime Session-view presence and coordinated admission. The bundle defines a trusted safety integration contract but does not ship that host/client bridge. Default allocation does not depend on those observations. Release/restart recovery after managed execution requires independently verified process-owner quiescence; without it, ownership remains quarantined. Pool configuration and acceptance are implemented; the full [directory-leasing plan](<ticket-directory-leasing-plan.md>) remains incomplete until these integrations and their end-to-end tests are supplied. See [deployment](<docs/006-deployment.md>) before enabling execution.
+
 ## Development
 
 Targets DeepSeek Harness `0.2.2-rc.3` with Node.js `24.9+`. `pnpm check` runs the typecheck, the tests and the build.

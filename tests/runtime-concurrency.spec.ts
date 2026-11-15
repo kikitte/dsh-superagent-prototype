@@ -105,6 +105,24 @@ it('runs prepare commands in the background, side by side, while accepts, intake
   expect(h.runtime.store.tickets.list().map(ticket => ticket.assignments.at(-1)!.state)).toEqual(['running', 'running'])
 })
 
+it('does not wake failed preparation Tickets into an automatic launch ping-pong', async () => {
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, prepare: 'fail preparation' } })
+  const spawn = h.subprocess.spawn.getMockImplementation()!
+  h.subprocess.spawn.mockImplementation(spec => spec.argv[0] !== 'sh' ? spawn(spec) : {
+    done: Promise.resolve({ exitCode: 7, signal: null }), waitForExit: async () => {},
+    collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) }, stderr: { readFrom: () => ({ text: 'Preparation failed', nextOffset: 18, lossy: false }) } },
+  })
+  const first = await h.acceptedTicket(feishu('1', '@bot 修一'))
+  const second = await h.acceptedTicket(feishu('2', '@bot 修二'))
+  expect([first.ticket, second.ticket].map(ticket => latestAssignment(ticket)?.report?.state)).toEqual(['failed', 'failed'])
+  const before = h.subprocess.spawn.mock.calls.filter(([spec]) => spec.argv[0] === 'sh').length
+  h.runtime.executor.wake(); await h.runtime.idle()
+  expect(h.runtime.effects.pending('launch')).toBe(false)
+  expect(h.subprocess.spawn.mock.calls.filter(([spec]) => spec.argv[0] === 'sh')).toHaveLength(before)
+  expect(h.runtime.store.directories.leases()).toHaveLength(2)
+})
+
 it('keeps a launch that a pause cut short queued, and finishes it once processing resumes', async () => {
   const settings = h.runtime.store.settings()
   h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, prepare: 'make worktree' } })

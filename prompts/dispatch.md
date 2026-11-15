@@ -42,7 +42,7 @@ For example, “Could we add a dark mode?” should arrive as that original requ
 Do not translate worker questions into your own technical decisions.
 
 Check ticket summaries after compaction to avoid duplicate work.
-Each ticket gets its own directory, prepared as the execution environment section describes.
+Before accepting, read orchestrator_read placement: operator-authored pool-selection instructions, pool IDs/descriptions and an immutable version. Include placement={poolId,reason,contextVersion} in each accept item, echoing that version. Choose by Ticket requirements and those instructions; choose default when no operator-configured pool is selected. Never choose a directory or change pools because directories are unavailable or worker slots are busy. A known pool with empty inventory is valid: the Executor queues work. A stale-context refusal leaves the candidate undecided: reread placement and retry. Acceptance records placement but no directory; the Executor reserves a directory and prepares it before execution. Attachments, retries and resumption keep the original pool and directory affinity, without a new placement decision.
 An accept is idempotent by trigger ID.
 An accept or attach takes an optional routing note of at most 30 words, counted with Chinese word segmentation for mixed text.
 Use it only for routing background or explicit human constraints, not implementation instructions.

@@ -5,6 +5,7 @@ import type { MessageId } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { dirname } from 'node:path'
+import { canonicalDirectory } from './directory-settings.ts'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
@@ -34,6 +35,8 @@ export interface SessionsHost {
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
+  /** Executor lease/resource/recovery guard, installed for restored workers and descendants. */
+  authorizeDirectory?(ticketId: string): void
   /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
   tools(agent: Agent, ticket?: Ticket): Tool[]
 }
@@ -96,6 +99,7 @@ export class Sessions {
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
   private readonly ctx: Context
+  private readonly listeners: (() => void)[] = []
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
@@ -107,22 +111,23 @@ export class Sessions {
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
   install(): void {
     const ctx = this.ctx
-    ctx.on('agent/disposed', ({ agent }) => {
+    this.listeners.push(ctx.on('agent/disposed', ({ agent }) => {
       this.release(agent)
       this.retryHealth.clear(agent.id); this.updateModelHealth()
-    })
-    ctx.on('session/event', (session, event) => {
+    }))
+    this.listeners.push(ctx.on('session/event', (session, event) => {
       const agent = ctx.agents.get(session.id)
       const binding = agent && agent.session === session ? this.bindings.get(agent) : undefined
       if (!agent || !binding || binding.subagent) return
       this.retryHealth.observe(agent.id, event)
       this.updateModelHealth()
-    })
-    ctx.on('agent/created', async ({ agent }) => { await this.decorate(agent); return undefined })
+    }))
+    this.listeners.push(ctx.on('agent/created', async ({ agent }) => { await this.decorate(agent); return undefined }))
     // Opening a Session in DSH's Web UI before its first turn may select the default preset for it: select ours again. After
     // its first turn DSH refuses any selection, which leaves it as it is.
-    ctx.inject(['agentPresets'], child => {
+    const presetScope = ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
+        if (this.host.closing()) return
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
         const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
         if (!ours || preset === ours || !agent) return
@@ -130,8 +135,13 @@ export class Sessions {
         presets.select(agent, ours).catch(() => {})
       })
     })
-    ctx.on('agent/status', ({ agent, status }) => {
+    this.listeners.push(() => { void presetScope.dispose().catch((error: unknown) => { ctx.logger.warn('Could not release preset listeners: %s', String(error)) }) })
+    this.listeners.push(ctx.on('agent/status', ({ agent, status }) => {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
+    }))
+    // In-process restarts may leave loaded workers/descendants: fence them before any async decoration or launch.
+    for (const agent of ctx.agents.list()) void this.decorate(agent).catch((error: unknown) => {
+      ctx.logger.warn('dsh-superagent could not decorate an existing Session: %s', String(error))
     })
   }
   /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
@@ -146,6 +156,9 @@ export class Sessions {
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
+    if (role === 'worker' && (!result.agent.session.header.cwd || canonicalDirectory(result.agent.session.header.cwd) !== canonicalDirectory(cwd))) {
+      throw new Error('Executor Session workspace differs from its committed directory affinity; restore the workspace through a verified supported operation')
+    }
     const settings = this.host.store.settings()
     await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
     await this.decorate(result.agent)
@@ -230,13 +243,15 @@ export class Sessions {
     return ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
   }
   private async decorate(agent: Agent): Promise<void> {
-    if (this.bindings.has(agent)) return
+    if (this.host.closing() || this.bindings.has(agent)) return
     const host = this.host
     const master = agent.id === host.masterId
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
+    // Ownership/recovery guards precede skill setup and any awaited work, including restored Sessions.
+    if (!master) binding.disposers.push(...this.workOnly(agent, ticket!.id))
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
@@ -262,9 +277,6 @@ export class Sessions {
     if (master) {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
-    } else {
-      // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
-      binding.disposers.push(...this.workOnly(agent, ticket!.id))
     }
   }
   /**
@@ -290,10 +302,15 @@ export class Sessions {
     const store = this.host.store
     const parent = scopeParentOf(agent)
     const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
-    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
+    const authorize = () => {
       const current = store.tickets.get(ticketId)
-      return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined
-    })]
+      if (!current || !liveTicket(current)) throw new Error('Ticket ended; new work needs an authorized resumption')
+      this.host.authorizeDirectory?.(ticketId)
+      if (agent.id === `worker-${ticketId}` && current.directoryAffinity && (!agent.session.header.cwd || canonicalDirectory(agent.session.header.cwd) !== current.directoryAffinity.path)) throw new Error('Executor Session workspace differs from directory affinity')
+    }
+    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
+      try { authorize(); return undefined } catch (error) { return String(error) }
+    }), agent.ctx.on('agent/pre-step', async (_payload, next) => { authorize(); return next() })]
   }
   /**
    * A subagent of an Executor Session, or of one of its subagents, which runs under DSH's `standard` preset with the worker's
@@ -348,5 +365,8 @@ export class Sessions {
     }
   }
   /** Releases prompt sections, skills, and tools registered by `Sessions` across all decorated agents. */
-  dispose(): void { for (const agent of [...this.bindings.keys()]) this.release(agent) }
+  dispose(): void {
+    for (const dispose of this.listeners.splice(0)) dispose()
+    for (const agent of [...this.bindings.keys()]) this.release(agent)
+  }
 }

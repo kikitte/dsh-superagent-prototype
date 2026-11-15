@@ -1,5 +1,6 @@
 /** Domain model of a proactive agent: the concepts and their invariants, independent of any source, policy, or executor. */
 import type { Reason } from './reasons.ts'
+import type { PlacementContext, PoolPlacement, TicketDirectoryAffinity } from './directories.ts'
 
 /** Actor identity in the source's own vocabulary; Policy decides which actors may originate work on that Source. */
 export interface ActorRef { source: string; id: string }
@@ -301,7 +302,13 @@ export interface Ticket {
   updatedAt: string
   /** The Triggers it was accepted from: the one that started it, and the batch its Eval held. */
   origin: { triggerId: string; triggerIds: string[] }
-  /** What its Executor chose: its short name, directory and assignment text. */
+  /** Immutable acceptance-time pool selection, separate from allocation and current ownership. */
+  placement: PoolPlacement
+  /** Exact retained semantic snapshot validated in the acceptance transaction. */
+  placementContext?: PlacementContext
+  /** Permanent first-reservation identity, retained after lease release. */
+  directoryAffinity?: TicketDirectoryAffinity
+  /** Its short name and assignment text; directory appears only after launch reservation. */
   execution?: Execution
   /** The latest failed delivery of an Input to its worker, until a delivery succeeds. */
   delivery?: { error: string; at: string }
@@ -312,7 +319,7 @@ export interface Ticket {
  * Thread closed; the ticket then ends unless its work has not finished (see `Tickets.unfinished`).
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
-export interface Execution { name: string; directory: string; assignment: string }
+export interface Execution { name: string; directory?: string; assignment: string }
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended

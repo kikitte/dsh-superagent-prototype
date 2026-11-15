@@ -110,7 +110,7 @@ it('shows the account each CLI signs in as, and keeps a saved CLI on screen whil
   expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI', '轮询间隔 / 秒', '连续失败几次后报告异常'])
   expect(all('.dt-card')[0]!.textContent).toContain('当前机器人 Widgets Bot')
   await type(field<HTMLInputElement>('智能体的 GitHub CLI'), '/opt/bin/gh-agent')
-  expect(github.textContent).toContain('保存会重启 dsh-superagent：2 个进行中的派工会中断，并带恢复说明重新开始。')
+  expect(github.textContent).toContain(zh.restartInterrupts.replace('{count}', '2'))
   await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
   expect(server.settings.sources.github!.config).toMatchObject({ cli: '/opt/bin/gh-agent' })
   expect(text()).toContain(zh.savedRestarting)

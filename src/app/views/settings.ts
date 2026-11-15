@@ -37,6 +37,7 @@ export function settingsView(store: Store, sources: SourceRegistry, health: Heal
         labels: store.get(KV.sources.labels(instance.id)) ?? {}, ...problem ? { problem } : {}, ...policyOf(sources, instance.id, health) }
     }),
     environment: { root: executionRoot(settings, stateDir), variables: declaredVariables(sources, settings) },
+    directoryInventory: store.directories.records(),
   }
 }
 export type SettingsView = ReturnType<typeof settingsView>

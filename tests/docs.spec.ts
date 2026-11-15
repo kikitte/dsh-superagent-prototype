@@ -10,7 +10,7 @@ const entries = ['README.md', 'SETUP.md']
 const documents = [...entries, ...readdirSync(join(ROOT, 'docs')).filter(name => name.endsWith('.md')).map(name => `docs/${name}`)]
 const read = (path: string): string => readFileSync(join(ROOT, path), 'utf8')
 function links(file: string): string[] {
-  return [...readFileSync(file, 'utf8').matchAll(/\]\(([^)\s]+)\)/g)].map(match => match[1]!.split('#')[0]!).filter(target => target && !/^[a-z]+:/.test(target))
+  return [...readFileSync(file, 'utf8').matchAll(/\]\((?:<([^>]+)>|([^\s)]+))\)/g)].map(match => (match[1] ?? match[2])!.split('#')[0]!).filter(target => target && !/^[a-z]+:/.test(target))
 }
 const files = (directory: string): string[] => readdirSync(join(ROOT, directory), { recursive: true, withFileTypes: true })
   .filter(entry => entry.isFile()).map(entry => relative(ROOT, join(entry.parentPath, entry.name)))
@@ -35,6 +35,26 @@ function listed(heading: string): string[] {
 }
 
 describe('documentation', () => {
+  it('documents trusted recovery rechecks separately from unfinished filesystem-effect reconciliation', () => {
+    for (const file of ['docs/005-panel.md', 'docs/006-deployment.md']) {
+      const doc = read(file)
+      expect(doc).toContain('Recheck recovery evidence')
+      expect(doc.toLowerCase()).toContain('filesystem-effect reconciliation')
+      expect(doc).toContain('only the Executor')
+    }
+    const deployment = read('docs/006-deployment.md')
+    expect(deployment).toContain('POST directory-leases/<lease id>/recheck-recovery')
+    expect(deployment).toContain('HTTP 409')
+    expect(deployment).toContain('no production process-owner provider')
+  })
+  it('documents semantic pool placement separately from directory leases and worker-slot admission', () => {
+    const prompts = read('docs/004-prompts.md')
+    expect(prompts).toContain('placement: { poolId, reason, contextVersion }')
+    expect(prompts).toContain('exact instruction revision')
+    expect(prompts).toContain('well-formed replay returns the original placement before current-context validation')
+    expect(prompts).toContain('lease release is not directory deletion')
+    expect(prompts).toContain('operational inventory and worker-slot changes do not')
+  })
   it('numbers documents consecutively from 000', () => {
     expect(numbered.map(name => name.slice(0, 3))).toEqual(numbered.map((_, index) => String(index).padStart(3, '0')))
   })

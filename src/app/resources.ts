@@ -20,6 +20,7 @@ import type { Settings } from './settings.ts'
 import { KV } from '../kv.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
+import { PlacementContexts } from './placement.ts'
 
 /** Resource descriptors exposed via orchestrator_read, marking which resources worker sessions may also read for their own ticket. */
 export const RESOURCES: readonly { name: string; holds: string; executor?: true }[] = [
@@ -41,6 +42,8 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'ticket/<id>/input/<id>', holds: 'one input it was delivered', executor: true },
   { name: 'trigger/<id>', holds: 'a trigger\'s text, where it went, the message it replies to and the messages around it on its thread',
     executor: true },
+  { name: 'placement', holds: 'current immutable pool-selection instructions, pool IDs/descriptions and version; read before accepting and echo version in placement.contextVersion' },
+  { name: 'placement/<version>', holds: 'retained immutable semantic snapshot for pagination or audit; historical versions cannot authorize new acceptance' },
   { name: 'settings', holds: 'settings by block, each with the revision a save names: the small blocks whole, the Policy and the Source '
     + 'instances summarized' },
   { name: 'settings/<block>', holds: 'one settings block whole, as orchestrator_settings_save takes it: policy, eval, executor, pause or '
@@ -58,7 +61,7 @@ export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(r
   .map(resource => `${resource.name}: ${resource.holds}`).join('; ')
 
 export interface ResourceHost {
-  readonly store: Pick<Store, 'get' | 'settings' | 'triggers' | 'tickets' | 'threads' | 'read' | 'decisions' | 'replyStatus'>
+  readonly store: Pick<Store, 'db' | 'atomic' | 'get' | 'settings' | 'triggers' | 'tickets' | 'threads' | 'read' | 'decisions' | 'replyStatus'>
   readonly pages: TextCache
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'skills' | 'defaultChanged'>
   readonly commands: Commands
@@ -153,6 +156,18 @@ const ROUTES: readonly Route[] = [
     const decision = main(read).store.decisions.get(read.rest)
     if (!decision) throw new Error('Unknown decision')
     return decisionDetails(decision)
+  }],
+  ['placement', read => {
+    const context = new PlacementContexts(main(read).store).current(), body = JSON.stringify(context)
+    // Small contexts are directly usable; large semantic catalogs retain explicit bounded pagination.
+    return body.length <= (read.limit ?? 8000) && read.offset === 0 ? context
+      : { version: context.version, instructionRevision: context.instructionRevision, next_resource: `placement/${context.version}`,
+        ...text({ ...read, resource: `placement/${context.version}` }, body) }
+  }],
+  ['placement/', read => {
+    const context = new PlacementContexts(main(read).store).get(read.rest)
+    if (!context) throw new UserError('stalePlacementContext')
+    return { version: context.version, instructionRevision: context.instructionRevision, ...text(read, JSON.stringify(context)) }
   }],
   ['settings', read => main(read).settings.view()],
   ['settings/', read => text(read, JSON.stringify(main(read).settings.block(read.rest)))],

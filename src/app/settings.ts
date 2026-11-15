@@ -13,6 +13,7 @@ import type { Sessions } from './sessions.ts'
 import { setupChanged, type Setup } from './setup.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
+import { validateDirectorySettings } from './directory-settings.ts'
 
 /**
  * Indicates an optimistic concurrency conflict when saving or syncing a settings block against a stale revision.
@@ -21,7 +22,8 @@ import { KV } from '../kv.ts'
 export class SettingsConflict extends Error {}
 const now = (): string => new Date().toISOString()
 /** Executor settings that control shell execution paths, prepare commands, and command shims. */
-const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands])
+const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands,
+  executor.directoryPools.map(({ id, directories, prepare, recycle }) => ({ id, directories, prepare, recycle }))])
 
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
 interface Block {
@@ -54,7 +56,9 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
 
 /** Host dependencies used by `Settings`. */
 export interface SettingsHost {
-  readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'get'>
+  readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'get' | 'directories'>
+  /** Default-pool root resolution for canonical overlap validation. */
+  readonly machine?: { readonly stateDir: string }
   readonly sources: SourceRegistry
   /** Notified when a settings save changes the policy version. */
   readonly engine: EngineForSettings
@@ -180,6 +184,13 @@ export class Settings {
     const effects = before === after ? new Map() : policyEffects(store.tickets.open(), old, SettingsSchema.parse(settings), scope)
     const notified = [...effects.keys()]
     store.atomic(() => {
+      // Revision, canonical identities, queued selections, leases and history are checked under the acceptance/reservation transaction lock.
+      if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
+      rules.guard?.(store.settings(), settings, origin)
+      if (kind === 'executor') {
+        validateDirectorySettings(store, store.settings().executor, settings.executor, this.host.machine?.stateDir)
+        store.directories.syncInventory(settings.executor)
+      }
       store.saveSettings(SettingsSchema.parse(settings), { source: origin, block, policyVersion: after, policyChanged: before !== after, notified })
       if (origin !== 'tool') sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
       if (before !== after) engine.policyChanged(before, after, effects)

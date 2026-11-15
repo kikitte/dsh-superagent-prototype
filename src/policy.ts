@@ -27,8 +27,14 @@ export function directionAllowed(value: unknown): value is AdmissionDirection {
   const result = AdmissionDirectionSchema.safeParse(value)
   return result.success && result.data.implementation_requested && result.data.target_basis !== 'undetermined' && !result.data.requires_design_decision
 }
+export const PoolPlacementSchema = z.object({
+  poolId: z.string().trim().min(1).max(80),
+  reason: z.string().trim().min(1).max(1000),
+  contextVersion: z.string().trim().min(1).max(200),
+}).strict().describe('Select a pool from orchestrator_read placement and echo its version; never a directory or scheduling choice.')
 export interface Assessment {
   decision: 'accept' | 'ignore' | 'unavailable'; rule_assessments: RuleAssessment[]; direction: unknown
+  placement?: z.infer<typeof PoolPlacementSchema> | null
   title: string; scope: string; reason: string; intent_evidence?: string | null; acknowledgement?: string | null; worktree_name?: string
 }
 /**
@@ -51,12 +57,13 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
   if (!directionAllowed(assessment.direction)) return { kind: 'ignore', audit, reason: { code: 'directionUnsettled' } }
   if (!matches.length) return { kind: 'ignore', audit, reason: { code: 'noRuleMatched' } }
   if (!assessment.intent_evidence) throw new Error('Acceptance requires intent_evidence')
+  const placement = PoolPlacementSchema.parse(assessment.placement)
   const { title, scope, worktree_name: name } = assessment
   if (strength === 'inferred' && settings.eval.mode !== 'auto') {
-    const proposal = { title, scope, worktree_name: name }
+    const proposal = { title, scope, worktree_name: name, placement }
     return { kind: 'ignore', audit: { ...audit, would_accept: true, proposal }, reason: { code: 'observed', values: { text: assessment.reason } } }
   }
-  return { kind: 'accept', title, scope, reason: assessment.reason, ...(assessment.acknowledgement ? { acknowledgement: assessment.acknowledgement } : {}),
+  return { kind: 'accept', title, scope, placement, reason: assessment.reason, ...(assessment.acknowledgement ? { acknowledgement: assessment.acknowledgement } : {}),
     rules: matches.map(match => match.rule_id), audit, ...(name ? { name } : {}) }
 }
 const DEFAULT_RULES = [
@@ -87,14 +94,36 @@ export const EvalConfigSchema = z.object({
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)
-/** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, and blocked commands. */
+/** Executor settings. Paths and executable hooks are operator-only; placement instructions are semantic, not shell commands. */
+const DirectoryIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)
+const InventoryDirectorySchema = z.object({ id: DirectoryIdSchema, path: z.string().trim().startsWith('/').max(4096) }).strict()
+const DirectoryPoolSchema = z.object({
+  id: DirectoryIdSchema.refine(id => id !== 'default', 'default is a reserved built-in pool'),
+  description: z.string().trim().min(1).max(2000),
+  directories: z.array(InventoryDirectorySchema).max(1000).default([]),
+  prepare: z.string().max(LIMITS.prepareCommand).default(''),
+  recycle: z.string().max(LIMITS.prepareCommand).default(''),
+}).strict()
 export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
+  defaultPoolDescription: z.string().trim().min(1).max(2000).default('Fresh dedicated execution directory for each Ticket.'),
+  placementInstructions: z.string().max(16000).default('Choose an operator-configured pool matching the Ticket requirements; otherwise choose default. Never change pools based on directory eligibility or worker-slot availability.'),
+  directoryPools: z.array(DirectoryPoolSchema).max(100).default([]),
   blockedCommands: z.array(CommandNameSchema).default([]),
-}).strict()
+}).strict().superRefine((executor, context) => {
+  const pools = new Set<string>(), directories = new Set<string>()
+  executor.directoryPools.forEach((pool, index) => {
+    if (pools.has(pool.id)) context.addIssue({ code: 'custom', path: ['directoryPools', index, 'id'], message: 'Duplicate pool ID' })
+    pools.add(pool.id)
+    pool.directories.forEach((directory, position) => {
+      if (directories.has(directory.id)) context.addIssue({ code: 'custom', path: ['directoryPools', index, 'directories', position, 'id'], message: 'Duplicate directory ID across pools' })
+      directories.add(directory.id)
+    })
+  })
+})
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({
   paused: z.boolean().default(false),

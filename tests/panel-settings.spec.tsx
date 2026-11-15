@@ -5,10 +5,73 @@ import { createRoot } from 'react-dom/client'
 import { Fields } from '../src/client/settings-kit.tsx'
 import { expect, it, onTestFinished } from 'vitest'
 import { zh } from '../src/client/locales.ts'
+import { ExecutorConfigSchema } from '../src/policy.ts'
 import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
 
 usePanel()
+it('adds, edits and removes fixed pools and registrations through a single Save/Cancel draft with confirmations and honest diagnostics', async () => {
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  expect(text()).toContain(zh.defaultPool)
+  expect(all('.dt-savebar')).toHaveLength(0)
+  await click(zh.poolAdd)
+  await type(field<HTMLInputElement>(zh.poolId), 'frontend')
+  await type(field<HTMLTextAreaElement>(zh.poolDescription), 'UI implementation')
+  await type(field<HTMLTextAreaElement>(zh.poolPrepare), 'restore-ticket-state')
+  await type(field<HTMLTextAreaElement>(zh.poolRecycle), 'preserve-and-recycle')
+  await click(zh.directoryAdd)
+  await type(field<HTMLInputElement>(zh.directoryId), 'frontend-a')
+  await type(field<HTMLInputElement>(zh.directoryPath), '/srv/frontend-a')
+  await type(field<HTMLTextAreaElement>(zh.placementInstructions), 'Use frontend for UI work; otherwise default.')
+  expect(server.settings.executor.directoryPools).toEqual([])
+  expect(all('.dt-savebar')).toHaveLength(1)
+  await click(zh.save)
+  expect(server.settings.executor.directoryPools).toEqual([{ id: 'frontend', description: 'UI implementation', prepare: 'restore-ticket-state', recycle: 'preserve-and-recycle', directories: [{ id: 'frontend-a', path: '/srv/frontend-a' }] }])
+  expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/executor'])
+  await click(zh.directoryRemove)
+  await click(zh.cancel)
+  expect(field<HTMLInputElement>(zh.directoryPath).value).toBe('/srv/frontend-a')
+  await click(zh.directoryRemove)
+  await click(zh.confirm)
+  expect(all('.dt-savebar')).toHaveLength(1)
+  await click(zh.discard)
+  expect(field<HTMLInputElement>(zh.directoryPath).value).toBe('/srv/frontend-a')
+  await type(field<HTMLInputElement>(zh.directoryPath), '/srv/frontend-b')
+  await click(zh.save)
+  expect(server.settings.executor.directoryPools[0]?.directories[0]?.path).toBe('/srv/frontend-b')
+  await click(zh.directoryDiagnostics)
+  expect(text()).toContain('unknown')
+  expect(text()).toContain('Authoritative cross-Session observation')
+  expect(text()).toContain(zh.directoryUnleased)
+  const refreshes = server.requests.filter(request => request.path === 'directories').length
+  await click(zh.directoryRefresh)
+  expect(server.requests.filter(request => request.path === 'directories').length).toBeGreaterThan(refreshes)
+  await click(zh.poolRemove)
+  await click(zh.confirm)
+  expect(server.settings.executor.directoryPools).toHaveLength(1)
+  await click(zh.save)
+  expect(server.settings.executor.directoryPools).toEqual([])
+  expect(text()).toContain(zh.defaultPool)
+})
+
+it('moves an unused directory registration between fixed pools as one revision-aware draft', async () => {
+  server.settings.executor.directoryPools = [
+    { id: 'frontend', description: 'UI work', prepare: '', recycle: '', directories: [{ id: 'shared-a', path: '/srv/shared-a' }] },
+    { id: 'backend', description: 'Server work', prepare: '', recycle: '', directories: [] },
+  ]
+  await mount()
+  await click(zh['tab.execution']); await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(all('button').find(button => button.textContent === zh.poolEdit)!)
+  const membership = field<HTMLSelectElement>(zh.directoryPoolMembership)
+  await act(async () => { membership.value = 'backend'; membership.dispatchEvent(new Event('change', { bubbles: true })) })
+  expect(server.settings.executor.directoryPools[0]?.directories).toHaveLength(1)
+  expect(all('.dt-savebar')).toHaveLength(1)
+  await click(zh.save)
+  expect(server.settings.executor.directoryPools.map(pool => pool.directories)).toEqual([[], [{ id: 'shared-a', path: '/srv/shared-a' }]])
+})
+
 it('keeps a person\'s own value where another save changed the same setting, and says so', async () => {
   await mount()
   await click(zh['tab.execution'])
@@ -53,7 +116,7 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
     'worker-model'); await type(effort as HTMLInputElement, 'high')
   expect([...document.querySelectorAll('#dt-worker-model-efforts option')].map(option => option.getAttribute('value'))).toEqual(['high'])
   await click(zh.save)
-  expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work',
+  expect(server.settings.executor).toEqual({ ...ExecutorConfigSchema.parse({}), maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
       model: 'worker-model', reasoningEffort: 'high' } })
   expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/eval',

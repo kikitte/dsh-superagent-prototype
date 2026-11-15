@@ -9,6 +9,8 @@ import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave }
 import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
+import { DirectoryStore } from './directory-store.ts'
+import { PlacementContexts } from './placement.ts'
 
 /** A Trigger's position on its thread timeline, ordered by timestamp and then `id` as tie-breaker. */
 export interface TimelinePlace { at: string; id: string }
@@ -50,6 +52,7 @@ export { SCHEMA_VERSION }
  */
 export class Store implements Repositories {
   readonly db: DatabaseSync
+  readonly directories: DirectoryStore
   /**
    * Opens or creates the SQLite database at `path`, migrating schema 10 to schema 11 in a single transaction.
    * @param report - Receives errors thrown by `afterCommit` callbacks without failing the committed transaction.
@@ -94,6 +97,8 @@ export class Store implements Repositories {
         const reason = error instanceof Error ? error.message : String(error)
         throw new Error(`The orchestrator database is unchanged at schema ${version}: its migration to schema ${SCHEMA_VERSION} failed: ${reason}`, { cause: error })
       }
+      this.directories = new DirectoryStore(this)
+      new PlacementContexts(this).current()
     } catch (error) {
       this.db.close()
       throw error
@@ -191,6 +196,7 @@ export class Store implements Repositories {
     const settings = SettingsSchema.parse(value)
     return this.atomic(() => {
       this.settingsVersions.save(revision => ({ ...record, revision, savedAt: new Date().toISOString(), settings }))
+      new PlacementContexts(this).current()
       if (record.block) this.set(KV.settings.block(record.block), this.blockRevision(record.block) + 1)
       return settings
     })

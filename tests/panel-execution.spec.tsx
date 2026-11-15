@@ -75,10 +75,50 @@ it('shows a Ticket with its stage, its Mandate details with the Trigger and Deci
   expect(tab(zh['tab.trigger']).getAttribute('aria-selected')).toBe('true')
 })
 
+it('separates accepted pool placement from absent allocation and retained affinity/lease history', async () => {
+  const detail = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...detail, directory: undefined, placement: { poolId: 'frontend', reason: 'UI implementation', contextVersion: 'ctx-1' } }
+  await mount()
+  await click(all('.dt-open').find(button => button.textContent === '修复回归')!)
+  await click(zh.ticketDirectoryPlacement)
+  expect(text()).toContain('frontend')
+  expect(text()).toContain('UI implementation')
+  expect(text()).toContain('ctx-1')
+  expect(text()).toContain(zh.directoryNotReserved)
+})
+
 it('reports a missing Ticket instead of rendering an empty page', async () => {
   at({ page: 'execution', id: 'missing' })
   await mount()
   expect(document.querySelector('.dt-hint')?.textContent).toBe(zh.ticketNotFound)
+})
+
+it('reviews recovery evidence for the displayed lease and keeps unavailable proof fenced', async () => {
+  server.directories = [{ directory: { id: 'default:t1', poolId: 'default', path: '/w/t1', lastLeaseSequence: 1, createdAt: '' },
+    occupancy: { state: 'clear', revision: 'dedicated', detail: 'Dedicated' },
+    lease: { id: 'lease-1', ticketId: 't1', directoryId: 'default:t1', poolId: 'default', path: '/w/t1', state: 'active',
+      acquiredAt: '', executionEpoch: 'old-epoch', recovery: 'quarantined', processOwner: 'owner-range-1', preparation: { state: 'complete' } } }]
+  at({ page: 'settings', query: { group: 'execution' } })
+  await mount()
+  await click(zh.directoryDiagnostics)
+  for (const expected of ['old-epoch', 'owner-range-1', zh.directoryRecoveryHint, zh.directoryDedicatedNoReuseGate]) expect(text()).toContain(expected)
+  await click(zh.directoryRecheckRecovery)
+  expect(server.requests.filter(request => request.path === 'directory-leases/lease-1/recheck-recovery')).toEqual([
+    { path: 'directory-leases/lease-1/recheck-recovery', method: 'POST', body: { executionEpoch: 'old-epoch' } },
+  ])
+  expect(text()).toContain('Ownership remains quarantined')
+  expect(text()).toContain('quarantined')
+  server.recheckingRecovery = async () => {
+    const lease = server.directories![0]!.lease!
+    lease.executionEpoch = 'new-epoch'; lease.recovery = 'cleared'
+    lease.quiescence = { evidence: 'Verified entire owner range empty', at: '2026-11-15T00:00:00Z', executionEpoch: 'old-epoch' }
+    return { cleared: true, detail: 'Process quiescence verified; ordinary admission still applies.' }
+  }
+  await click(zh.directoryRecheckRecovery)
+  expect(text()).toContain('new-epoch')
+  expect(text()).toContain('Verified entire owner range empty')
+  expect(text()).toContain('Process quiescence verified; ordinary admission still applies.')
+  expect(all('button').some(button => button.textContent === zh.directoryRecheckRecovery)).toBe(false)
 })
 
 it('links a question to its Channel, folds consecutive automated messages among Inputs, and shows field explanations in a hover tooltip',

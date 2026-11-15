@@ -10,10 +10,12 @@ import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, b
   from './prompts.ts'
 import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
+import { DirectorySettingsError } from './directory-settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
+import { DirectoryRecoveryConflict } from '../executor/directories.ts'
 import type { Health } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Sessions } from './sessions.ts'
@@ -37,7 +39,7 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
-  readonly executor: Pick<DshExecutor, 'activeCount'>
+  readonly executor: Pick<DshExecutor, 'activeCount' | 'directories' | 'wake'>
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -86,8 +88,9 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   }
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
+  if (error instanceof DirectorySettingsError) return [400, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
-  if (error instanceof SettingsConflict || error instanceof PromptConflict) return [409, { error: error.message }]
+  if (error instanceof SettingsConflict || error instanceof PromptConflict || error instanceof DirectoryRecoveryConflict) return [409, { error: error.message }]
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
 
@@ -117,7 +120,14 @@ export type StateView = ReturnType<typeof stateView>
 function ticketPage(runtime: HttpHost, id: string) {
   const detail = ticketDetail(views(runtime), id), ticket = runtime.store.tickets.get(id)
   if (!detail || !ticket) throw new RouteError(404, 'Ticket not found')
-  return { ...detail, environment: runtime.configured() ? runtime.ticketEnvironment(ticket) : [] }
+  const leases = runtime.store.directories.leases().filter(lease => lease.ticketId === id)
+  const directoryWait = runtime.executor.directories.status(id)
+  return { ...detail, environment: runtime.configured() ? runtime.ticketEnvironment(ticket) : [],
+    ...(directoryWait ? { directoryWait } : {}),
+    ...(ticket.placement ? { placement: ticket.placement } : {}),
+    ...(ticket.placementContext ? { placementContext: ticket.placementContext } : {}),
+    ...(ticket.directoryAffinity ? { directoryAffinity: ticket.directoryAffinity } : {}),
+    ...(leases.length ? { directoryLeases: leases } : {}) }
 }
 export type TicketPageView = ReturnType<typeof ticketPage>
 function promptsView(runtime: HttpHost, revision: number | undefined, offset: number) {
@@ -160,6 +170,18 @@ function routes(runtime: HttpHost): Routes {
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),
+    'GET directories': () => runtime.executor.directories.diagnostics(),
+    'POST directories/refresh': async () => {
+      const diagnostics = await runtime.executor.directories.diagnostics()
+      runtime.executor.wake(); runtime.requestPass()
+      return diagnostics
+    },
+    'POST directory-leases/:id/recheck-recovery': async ({ params, body }) => {
+      const { executionEpoch } = z.object({ executionEpoch: z.string().trim().min(1).max(200) }).strict().parse(await body())
+      const result = await runtime.executor.directories.recheckRecovery(params.id, executionEpoch)
+      if (result.cleared) runtime.executor.wake()
+      return result
+    },
     'POST sources/:id/labels': ({ params }) => runtime.settings.refreshLabels(params.id),
     'GET threads': ({ query }) => {
       const { filter, offset, limit } = ThreadsQuery.parse(query)

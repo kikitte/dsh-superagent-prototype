@@ -1,5 +1,7 @@
 /** Concurrency, retry, and validation tests for settings saves, pause toggling, and policy synchronization. */
 import { afterEach, expect, it, vi } from 'vitest'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { UserError } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { Setup } from '../src/app/setup.ts'
@@ -14,6 +16,30 @@ function deferred<T>() {
   return { promise, resolve }
 }
 const model = { provider: 'worker-provider', model: 'worker-model' }
+
+it('saves pool CRUD as a revision-aware whole executor block, rejects model environment changes, and creates no directories', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  const directory = join(h.runtime.machine.stateDir, 'registered-only')
+  const before = store.settings().executor
+  const pool = { id: 'ui', description: 'UI implementation', directories: [{ id: 'ui-1', path: directory }], prepare: '', recycle: '' }
+  const revision = store.blockRevision('executor')
+  await expect(settings.save('executor', { ...before, directoryPools: [pool] }, revision, 'tool')).rejects.toThrow(new UserError('panelOnlyEnvironment'))
+  await settings.save('executor', { ...before, directoryPools: [pool] }, revision, 'panel')
+  expect(existsSync(directory)).toBe(false)
+  expect(store.directories.records()).toEqual([expect.objectContaining({ id: 'ui-1', poolId: 'ui', path: directory })])
+  await expect(settings.save('executor', before, revision, 'panel')).rejects.toThrow(SettingsConflict)
+  const saved = store.settings().executor, nextRevision = store.blockRevision('executor')
+  await settings.save('executor', { ...saved, placementInstructions: 'Use UI for UI work; otherwise default.', defaultPoolDescription: 'Dedicated workspace', directoryPools: [{ ...pool, description: 'Frontend work' }] }, nextRevision, 'tool')
+  const current = store.settings().executor, currentRevision = store.blockRevision('executor')
+  await expect(settings.save('executor', { ...current, directoryPools: [{ ...pool, recycle: 'rm -rf artifacts' }] }, currentRevision, 'tool')).rejects.toThrow(new UserError('panelOnlyEnvironment'))
+  await expect(settings.save('executor', { ...current, directoryPools: [{ ...pool, directories: [...pool.directories, { id: 'alias', path: `${directory}/nested` }] }] }, currentRevision, 'panel')).rejects.toThrow('aliases or overlap')
+  expect(store.blockRevision('executor')).toBe(currentRevision)
+  expect(store.directories.records()).toHaveLength(1)
+  await settings.save('executor', { ...current, directoryPools: [] }, currentRevision, 'panel')
+  expect(store.directories.records()[0]?.retired).toBe(true)
+  expect(existsSync(directory)).toBe(false)
+})
 
 it('refuses a save of a block that another save changed during its model or account check, and saves nothing of it', async () => {
   h = await startRuntime()

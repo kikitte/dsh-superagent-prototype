@@ -85,6 +85,8 @@ export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
+  directories?: ApiResponse<'GET directories'>
+  recheckingRecovery?: (id: string, executionEpoch: string) => Promise<ApiResponse<'POST directory-leases/:id/recheck-recovery'>>
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
@@ -165,6 +167,7 @@ const stateView = (): StateView => ({
 })
 const settingsView = (): ApiResponse<'GET settings'> => ({
   policyVersion: 'abcdef1234567890',
+  directoryInventory: [],
   blocks: { policy: { value: server.settings.policy, revision: server.revisions.policy ?? 0 },
     eval: { value: server.settings.eval, revision: server.revisions.eval ?? 0 },
     executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 } },
@@ -290,6 +293,11 @@ const ticketOf = (id: string) =>
   [...server.tickets.open, ...server.person, ...server.tickets.ended].find(ticket => ticket.id === id) ?? server.ticketDetails[id]
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
+const directoryDiagnostics = (): ApiResponse<'GET directories'> => server.directories ?? server.settings.executor.directoryPools.flatMap(pool => pool.directories.map(directory => ({
+  directory: { ...directory, poolId: pool.id, lastLeaseSequence: 0, createdAt: '' },
+  occupancy: { state: 'unknown' as const, revision: 'unavailable', detail: 'Authoritative cross-Session observation and coordinated admission are unavailable.' },
+  blocker: 'Fixed inventory is unusable until authoritative observation/admission is available.',
+})))
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
@@ -300,6 +308,13 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   } },
   'GET sources': { answer: sourceStatuses },
   'GET settings': { answer: settingsView },
+  'GET directories': { answer: directoryDiagnostics },
+  'POST directories/refresh': { answer: directoryDiagnostics },
+  'POST directory-leases/:id/recheck-recovery': { body: true, answer: ({ params, body }) => {
+    z.object({ executionEpoch: z.string().min(1) }).strict().parse(body)
+    return server.recheckingRecovery?.(params.id, body.executionEpoch)
+      ?? { cleared: false, detail: 'No trusted durable process-owner provider is installed. Ownership remains quarantined.' }
+  } },
   'POST sources/:id/labels': { answer: () => {
     // Label refresh failures come from the bot CLI and are returned verbatim.
     if (server.joinError) return refuse(500, server.joinError)

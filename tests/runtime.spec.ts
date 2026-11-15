@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
+import { PlacementContexts } from '../src/app/placement.ts'
+import type { DirectoryLeaseRecord } from '../src/app/directory-store.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
@@ -60,7 +62,16 @@ let agents: Map<string, { id: string; status: string; inbox: { nextTurn: UserMes
 const runTool = async (sessionId: string, name: string, args: unknown) => {
   const tool = tools.get(sessionId)?.get(name)
   if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
-  const output = await tool.execute(args, { signal: new AbortController().signal })
+  const input = args as Record<string, unknown>
+  const prepared = name === 'orchestrator_eval_decide' && input.decision === 'accept' && !input.placement
+    ? { ...input, placement: { poolId: 'default', reason: 'No operator pool selected', contextVersion: new PlacementContexts(runtime.store).current().version } } : args
+  const output = await tool.execute(prepared, { signal: new AbortController().signal })
+  const ticketId = sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
+  if (ticketId && runtime.store.tickets.get(ticketId)?.ended) {
+    const agent = agents.get(sessionId)!
+    agent.status = 'idle'
+    ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent, status: 'idle' } as never)
+  }
   expect(JSON.parse(JSON.stringify(output))).toStrictEqual(output)
   await runtime.idle()
   return output as Record<string, unknown>
@@ -78,6 +89,8 @@ async function receive(trigger: Trigger, target = runtime) {
 let services: Record<string, unknown>
 /** DSH's job registry the Runtime's Executor reads its workers' shell jobs from. */
 let jobs: ReturnType<typeof jobRegistry>
+/** Trusted external-supervisor stand-in: this host runs no real workers/hooks; all simulated subprocess jobs are contained here. */
+let processOwners: { contain: ReturnType<typeof vi.fn<(lease: DirectoryLeaseRecord) => Promise<string>>>; proveQuiescent: ReturnType<typeof vi.fn<(lease: DirectoryLeaseRecord, owner: string) => Promise<string | undefined>>> }
 /** What worker commands of the startup checks print, by argv; an Error makes the command fail with its message. */
 let answers: Record<string, string | Error>
 /** Stand-in CLIs on disk, since setup finds executables before it runs them: the agent's, the merge account's and the Feishu bot's. */
@@ -86,13 +99,16 @@ const OTHER = () => join(directory, 'other-gh')
 const BOT = () => join(directory, 'lark-bot')
 const HELPERS = 'git config -z --show-origin --get-all credential.https://github.com.helper'
 const SCOPED = 'git config -z --show-scope --get-regexp ^(credential\\..*|http\\..*extraheader)$'
-const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
+const subprocess = { spawn: vi.fn((spec: { argv: readonly string[]; env?: Record<string, string> }) => {
   // Strip leading `env` and `KEY=VALUE` arguments before looking up the command response.
   const argv = [...spec.argv]
   while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
   const answer = answers[argv.join(' ')] ?? ''
+  // The fake worktree hook has no real Git subprocess; model its successful non-clobbering target creation.
+  if (!(answer instanceof Error) && argv[0] === 'sh' && argv[2]?.includes('worktree add') && spec.env?.DSH_SUPERAGENT_DIR) mkdirSync(spec.env.DSH_SUPERAGENT_DIR)
   const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
-  return { done: Promise.resolve({ exitCode: answer instanceof Error ? 1 : 0, signal: null }), collected: { stdout: reader(answer instanceof Error ? '' : answer), stderr: reader(answer instanceof Error ? answer.message : '') } }
+  const done = Promise.resolve({ exitCode: answer instanceof Error ? 1 : 0, signal: null })
+  return { done, waitForExit: async () => await done, collected: { stdout: reader(answer instanceof Error ? '' : answer), stderr: reader(answer instanceof Error ? answer.message : '') } }
 }) }
 /** Source account overrides for test setup; `feishu: null` disables the Feishu source. */
 interface Accounts { github?: Record<string, unknown>; feishu?: Record<string, unknown> | null }
@@ -123,7 +139,8 @@ function feishu(id: string, text: string, overrides: Record<string, unknown> = {
 const worktreeName = 'fix-regression'
 /** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
 async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
+  const placement = item.kind === 'accept' && !item.placement ? { poolId: 'default', reason: 'No operator pool selected', contextVersion: new PlacementContexts(runtime.store).current().version } : undefined
+  const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [{ ...item, ...(placement ? { placement } : {}) }] }) as { results: Record<string, unknown>[] }
   if (results[0]!.refused) throw new Error(String(results[0]!.refused))
   return results[0]!
 }
@@ -154,14 +171,19 @@ beforeEach(async () => {
     [SCOPED]: `global\0credential.helper\n\0global\0credential.https://github.com.helper\n${credentialHelper(AGENT())}\0`,
   }
   const ctx = new Context()
-  agents = new Map()
+  const hostAgents: typeof agents = new Map()
+  agents = Object.assign(hostAgents, { list: () => [...hostAgents.values()] })
   tools = new Map()
   sections = new Map()
   guards = new Map()
   restricts = new Map()
   deliveries = vi.fn()
+  // Long-lived fake callbacks belong to this host, never the globals a later beforeEach replaces.
+  const fixture = { agents, tools, sections, guards, restricts, deliveries }
+  {
+  const { agents, tools, sections, guards, restricts, deliveries } = fixture
   controller = {
-    create: vi.fn(async ({ sessionId, agentPreset }) => {
+    create: vi.fn(async ({ sessionId, agentPreset, workspaceId, directory: cwd }) => {
       if (agents.has(sessionId)) return
       const agentCtx = new Context()
       const preset = {}
@@ -196,15 +218,23 @@ beforeEach(async () => {
         deliveries({ sessionId, mode, id: message.id, text: message.content.map(block => block.type === 'text' ? block.text : '').join('') })
         agents.get(sessionId)!.status = 'running'
       })
-      agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver('queue'), steer: deliver('steer'), status: 'idle', inject: vi.fn(), session: { id: sessionId, header: { agentPreset }, snapshotEvents: () => modelEvents, requestHeader: () => undefined, append: vi.fn((type: string, data: unknown) => { modelEvents.push({ type, data }) }) }, cancel: vi.fn(), whenIdle: async () => {} } as never)
+      agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver('queue'), steer: deliver('steer'), status: 'idle', inject: vi.fn(), session: { id: sessionId, header: { agentPreset, cwd: cwd ?? workspaceId }, snapshotEvents: () => modelEvents, requestHeader: () => undefined, append: vi.fn((type: string, data: unknown) => { modelEvents.push({ type, data }) }) }, cancel: vi.fn(() => { const agent = agents.get(sessionId)!; if (agent.status === 'idle') return; queueMicrotask(() => { if (agent.status === 'idle') return; agent.status = 'idle'; ctx.emit('agent/status', { agent, status: 'idle' } as never) }) }), whenIdle: async () => {} } as never)
       bindScopeParent(agents.get(sessionId)!, preset)
     }),
     selectModel: vi.fn(async () => {}), resolveAgent: vi.fn(async id => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }), rename: vi.fn(async () => {}),
     prompt: vi.fn(() => { throw new Error('Plugin delivery must not use user RPC') }),
     inspect: vi.fn(async () => ({ events: [] })),
   }
+  }
   jobs = jobRegistry()
-  services = { agents, llm: { resolveCallConfig: vi.fn(async value => value) }, sessionController: controller, sessionPersistence: { flush: vi.fn(async () => {}), open: vi.fn(async () => ({ read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} })) }, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer: { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }, jobs: jobs.service }
+  const fixtureJobs = jobs
+  const ranges = new Set<string>()
+  processOwners = {
+    contain: vi.fn(async lease => { const owner = `fixture-supervisor/${lease.id}`; ranges.add(owner); return owner }),
+    proveQuiescent: vi.fn(async (lease, owner) => ranges.has(owner) && !fixtureJobs.service.list(`worker-${lease.ticketId}`).some(job => job.status === 'running')
+      ? `Fixture external supervisor verified contained range ${owner} empty` : undefined),
+  }
+  services = { executionDirectorySafety: { processes: processOwners }, agents, llm: { resolveCallConfig: vi.fn(async value => value) }, sessionController: controller, sessionPersistence: { flush: vi.fn(async () => {}), open: vi.fn(async () => ({ read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} })) }, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer: { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }, jobs: jobs.service }
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   for (const cli of [AGENT(), OTHER(), BOT()]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
   const store = new Store(join(directory, 'orchestrator.sqlite')); seed(store); store.close()
@@ -534,6 +564,23 @@ it('relaunches running assignments after a restart with a recovery note', async 
   // The new Assignment's message says only what is new, as the Session holds the first; the launch's own pass delivers the
   // recovery note as it reads.
   expect(relays(`worker-${ticket.id}`)).toEqual([{ ticket_id: ticket.id, assignment: 2 }, { text: expect.stringContaining('host restarted') }])
+})
+
+it('quarantines prior-epoch leases without trusted external proof instead of inferring safety from empty jobs or host shutdown', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  const lease = runtime.store.directories.leaseForTicket(ticket.id)!
+  expect(lease.processOwner).toBe(`fixture-supervisor/${lease.id}`)
+  processOwners.proveQuiescent.mockResolvedValue(undefined)
+  const next = await restart()
+  await next.ready
+  deliveries.mockClear()
+  await next.pump(); await next.idle()
+  expect(jobs.service.list(sessionId)).toEqual([])
+  expect(next.store.directories.leaseForTicket(ticket.id)).toMatchObject({ id: lease.id, recovery: 'quarantined', executionEpoch: lease.executionEpoch })
+  expect(next.store.tickets.get(ticket.id)?.directoryAffinity).toEqual(ticket.directoryAffinity)
+  expect(next.executor.activeCount()).toBe(0)
+  expect(relays(sessionId)).toEqual([])
+  expect(processOwners.proveQuiescent).toHaveBeenCalled()
 })
 
 it('projects read models for the management page and removes thread subscriptions from the Web surface', async () => {
@@ -1093,22 +1140,24 @@ it('runs the prepare command once for a new ticket, under the execution root wit
   prepare('exit 3')
   const failed = await acceptedTicket(feishu('9', '@bot 修一下标题'))
   await runtime.idle()
-  expect(runtime.store.tickets.get(failed.ticket.id)!.assignments.at(-1)).toMatchObject({ report: expect.objectContaining({ state: 'failed', summary: expect.stringContaining('The prepare command failed: fatal: no such clone') }) })
+  expect(runtime.store.tickets.get(failed.ticket.id)!.assignments.at(-1)).toMatchObject({ report: expect.objectContaining({ state: 'failed', summary: expect.stringContaining('fatal: no such clone') }) })
   expect(waitsForPerson(runtime.store.tickets.get(failed.ticket.id)!)).toBe(true)
 })
 
-it('counts a ticket whose directory the host prepared before prepare commands existed as prepared', async () => {
+it('never treats an existing path as durable preparation evidence or blindly replays failed preparation', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'offline' })
-  // A ticket from before prepare commands has its worktree.
-  const stored = runtime.store.tickets.get(ticket.id)!
-  runtime.store.tickets.save({ ...stored, execution: { ...stored.execution!, directory } })
+  const lease = runtime.store.directories.leaseForTicket(ticket.id)!
+  expect(lease.preparation.state).toBe('complete')
+  // Simulate interrupted/failed external effects despite the already existing directory.
+  runtime.store.directories.saveLease({ ...lease, state: 'preparing', preparation: { state: 'failed', error: 'Preparation needs verified operator reconciliation' } })
   runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: 'exit 1' } })
   subprocess.spawn.mockClear()
   await runtime.engine.retryTicket(ticket.id)
   await runtime.idle()
   expect(subprocess.spawn.mock.calls.some(([spec]) => spec.argv[0] === 'sh')).toBe(false)
-  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.state).toBe('running')
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('reconciliation') })
+  expect(runtime.store.directories.leaseForTicket(ticket.id)).toMatchObject({ id: lease.id, path: lease.path, preparation: { state: 'failed' } })
 })
 
 it('runs a GitHub-only deployment: the GitHub part of the Policy decides alone, and the Feishu part has nothing to sync', async () => {
@@ -1560,7 +1609,7 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   const { ticket, sessionId } = await acceptedTicket()
   expect(guards.get(sessionId)!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
-  expect(guards.get(sessionId)!()).toBe('Ticket ended; new work needs a new authorized ticket')
+  expect(guards.get(sessionId)!()).toBe('Error: Ticket ended; new work needs an authorized resumption')
   expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }])
   // A worker keeps only the profile's work tools: none that ask a person, change the profile, schedule or start work outside
   // the worker slots, reach other Sessions or edit documents, whenever they were registered.
@@ -1606,15 +1655,15 @@ it('runs a launch that fails for a passing reason again on the launch backoff th
   await runtime.idle()
   expect(runtime.store.tickets.get(prepared.ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('503') })
   expect(runs()).toBe(before + 1)
-  // A retry runs the prepare command again, for the directory it left empty was removed; resuming relaunches no failed launch.
+  // Failed external effects remain durable; neither resume nor retry blindly reruns the hook.
   delete answers['sh -c exit 3']
   runtime.executor.resume()
   await runtime.idle()
   expect(runs()).toBe(before + 1)
   runtime.engine.retryTicket(prepared.ticket.id)
   await runtime.idle()
-  expect(runs()).toBe(before + 2)
-  expect(runtime.store.tickets.get(prepared.ticket.id)!.assignments.at(-1)).toMatchObject({ state: 'running' })
+  expect(runs()).toBe(before + 1)
+  expect(runtime.store.tickets.get(prepared.ticket.id)!.assignments.at(-1)?.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('503') })
 })
 
 it('launches a queued Assignment once when the host resumes, and gives a failed launch\'s slot back', async () => {
@@ -1623,7 +1672,8 @@ it('launches a queued Assignment once when the host resumes, and gives a failed 
   const failed = await acceptedTicket(feishu('50', '@bot 修 一', { root_id: undefined }))
   await runtime.idle()
   expect(runtime.store.tickets.get(failed.ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed' })
-  // The failed launch holds no slot: the next ticket launches in the only one.
+  // The failed launch holds no slot: the next Ticket uses the corrected policy for its new lease.
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: '' } })
   delete answers['sh -c exit 3']
   const next = await acceptedTicket(feishu('51', '@bot 修 二', { root_id: undefined }))
   await runtime.idle()
@@ -1721,7 +1771,7 @@ it('gives a subagent of a worker only the worker\'s work tools, and none once th
   expect(restricts.get('child-1')).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
   expect(guards.get('child-1')!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
-  expect(guards.get('child-1')!()).toBe('Ticket ended; new work needs a new authorized ticket')
+  expect(guards.get('child-1')!()).toBe('Error: Ticket ended; new work needs an authorized resumption')
   // Another Session's subagent is left as it is.
   await (controller.create as (options: { sessionId: string }) => Promise<void>)({ sessionId: 'child-2' })
   const other = agents.get('child-2')! as unknown as { session: { header: { parentSession?: string } } }
@@ -1742,7 +1792,7 @@ it('gives a subagent of a worker\'s subagent the same work tools and guard', asy
   }
   expect(restricts.get('grandchild-1')).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
   runtime.engine.stopTicket(ticket.id)
-  expect(guards.get('grandchild-1')!()).toBe('Ticket ended; new work needs a new authorized ticket')
+  expect(guards.get('grandchild-1')!()).toBe('Error: Ticket ended; new work needs an authorized resumption')
 })
 
 it('gives the Assignment a restart starts the messages the replaced one had delivered but no step took, once', async () => {

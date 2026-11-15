@@ -161,6 +161,19 @@ describe('ticket directory check', () => {
   })
 })
 
+it('waits for the entire hook process range instead of direct shell completion', async () => {
+  const range = Promise.withResolvers<void>()
+  const handle = { done: Promise.resolve({ exitCode: 0, signal: null }), waitForExit: vi.fn(() => range.promise), collected: {} }
+  const runtime = { spawn: () => handle } as unknown as SubprocessRuntime
+  let completed = false
+  const hook = runAsWorker(runtime, ['sh', '-c', 'prepare'], dir, new AbortController().signal, {}, true).then(() => { completed = true })
+  await Promise.resolve(); await Promise.resolve()
+  expect(handle.waitForExit).toHaveBeenCalledOnce(); expect(completed).toBe(false)
+  range.resolve(); await hook; expect(completed).toBe(true)
+  handle.waitForExit.mockRejectedValueOnce(new Error('Process ownership lost'))
+  await expect(runAsWorker(runtime, ['sh', '-c', 'prepare'], dir, new AbortController().signal, {}, true)).rejects.toThrow('ownership lost')
+})
+
 describe('the repository the host\'s environment names', () => {
   it('is left alone by the tests\' git and named in no worker\'s environment, as when they run inside `git rebase --exec`', async () => {
     // A scratch repository stands for the one under test, which `git rebase --exec` names in GIT_DIR and GIT_WORK_TREE.

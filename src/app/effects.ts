@@ -15,6 +15,8 @@ export interface EffectPayloads {
   launch: { ticketId: string; assignmentId: string }
   /** Hand a ticket's waiting Inputs to its running Assignment; the key is the Ticket ID. */
   delivery: { ticketId: string }
+  /** Stop, preserve/recycle, and atomically release a Ticket's directory and Git resource. */
+  directoryRelease: { ticketId: string; leaseId: string; executionEpoch: string }
   /** Steer a report or a candidate into the main Session; the key is the request ID. */
   relay: { text: string }
   /** Inject a notice into the main Session without waking it; the key names what it reports, such as `prompts`. */

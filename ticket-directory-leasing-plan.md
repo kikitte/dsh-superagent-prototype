@@ -1,8 +1,20 @@
 # Plan: rule-driven Ticket placement in execution directory pools
 
-Status: proposed; implementation has not started.
+Status: partially implemented. Semantic pool settings and operator CRUD, versioned explicit/proactive acceptance, durable directory/lease/Git-claim storage, policy-specific reservation and preparation, affinity, conservative release/recovery fences, diagnostics, and focused tests are implemented. **Not complete:** DSH 0.2.2-rc.3 does not expose the required cross-Session/view admission or restart-durable process-owner service. The bundle exposes trusted integration contracts but ships no authoritative host/client presence/admission bridge or production process-owner provider. Fixed inventory therefore stays `unknown`/unusable without an integration; default allocation bypasses that gate. After managed execution, release/recovery without independently verified process-owner evidence retains ownership in quarantine. The remaining unchecked requirements, including end-to-end presence/admission, supervisor crash tests, and operator reconciliation workflows, must not be represented as implemented.
+
+Validation of the partial implementation: `pnpm check` passes (64 test files, 1,290 tests, typecheck and bundle build). Tests validate the implemented contracts and fail-closed behavior; they do not establish the missing production presence/admission bridge, durable process-owner integration, supervisor/descendant containment under hard crashes, or operator filesystem-effect reconciliation workflows.
 
 Scope: no application data has been produced. Implement for a fresh database; legacy compatibility, data migration, backfills, and historical-path classification are out of scope. Restart recovery and directory affinity still apply to all Tickets created under this design.
+
+## Continuation progress — 2026-11-15
+
+- [x] Add an operator **Recheck recovery evidence** action and strict management API bound to the reviewed lease ID/execution epoch. Only the trusted process-owner provider can supply proof; missing provider/owner/proof leaves quarantine intact. Clearance retains ownership/affinity and wakes only the Executor. Ordinary admission/preparation/release still apply.
+- [x] Reject stale recovery reviews, changed lease snapshots, concurrent delayed proofs and replayed clearance; retain failed/interrupted preparation/recycling diagnostics after process recovery without replaying hooks.
+- [x] Show execution epoch, durable process owner, quiescence evidence, recycling state and remaining reconciliation errors in directory diagnostics; document the management route, stale-review remedy and missing-provider limitation.
+- [x] Add eight isolated allocator SIGKILL/reopen tests covering reserved, preparing, active and releasing leases under both policies. Verify durable ownership, affinity, usage, applicable Git claims, preserved partial filesystem effects and quarantine without restart proof. These are allocator crash tests, not production supervisor/descendant-containment tests.
+- [x] Validate this continuation with `pnpm check` (64 files, 1,290 tests, typecheck and bundle build) and review the diff; `git diff --check` passes.
+
+Next required integration work remains the authoritative host/client presence and admission bridge, a production durable process-owner provider, supervisor/descendant hard-crash tests, and verified operator filesystem-effect reconciliation. The original broad requirements below remain unchecked where their full integration coverage is not yet established.
 
 ## Objective
 

@@ -35,7 +35,7 @@ Report a real blocker internally with evidence, attempted remedies and the speci
 A code change without a PR is not ready unless the assignment explicitly requests a different deliverable.
 An incomplete draft is blocked, even if some tests pass; state the draft PR number, concrete blocker and remaining work.
 Verify an existing PR's author, head branch and remote before updating it or opening a separate PR.
-Do not delete ticket directories or rewrite unrelated branches.
+Do not delete execution directories or rewrite unrelated branches. The main Session selected the execution directory pool at acceptance; the Executor reserves the directory. Never select or change pool placement, directory affinity or leases. A Ticket short name identifies its branch and need not match the directory basename.
 Review changes and run relevant checks.
 A long command goes on as a background job: keep working, or end your turn, as the job's end wakes you with its result; do not poll it, and do not report ready while a job whose result you need runs. Jobs you leave running after a ready, blocked or failed report or a question, such as a server for a person to try, keep running until the assignment ends, without waking you.
 Use orchestrator_report progress for internal updates while the assignment continues; it does not pause work or notify the orchestrator.

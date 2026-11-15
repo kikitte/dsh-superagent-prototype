@@ -2,8 +2,8 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
-  type Trigger } from '../core/index.ts'
-import { AdmissionDirectionSchema, RuleAssessmentSchema, assessmentOutcome, directionAllowed, type Settings } from '../policy.ts'
+  type PlacementContext, type Trigger } from '../core/index.ts'
+import { AdmissionDirectionSchema, PoolPlacementSchema, RuleAssessmentSchema, assessmentOutcome, directionAllowed, type Settings } from '../policy.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { Deployment } from '../deployment.ts'
@@ -26,12 +26,15 @@ export const AssessmentSchema = z.object({
   direction: AdmissionDirectionSchema.describe('Required for every decision.'),
   title: z.string().min(1).max(160),
   worktree_name: WorktreeNameSchema.optional(),
+  placement: PoolPlacementSchema.nullish(),
   scope: z.string().max(1500),
   intent_evidence: z.string().trim().min(1).max(700).nullish().describe('For acceptance: the quotes that establish the three facts.'),
   acknowledgement: AcknowledgementSchema.nullish().describe('For acceptance: one sentence in the source language, posted as a reply to the trigger; omit only when a matched rule asks for silence.'),
   reason: z.string().min(1).max(500),
 }).strict().refine(value => value.decision !== 'accept' || !directionAllowed(value.direction) || !value.rule_assessments.some(rule => rule.matched)
   || !!value.worktree_name, { message: 'Accepted work requires a short English worktree_name', path: ['worktree_name'] })
+  .refine(value => value.decision !== 'accept' || !!value.placement,
+    { message: 'Acceptance requires placement; read orchestrator_read placement', path: ['placement'] })
 
 /** Character limits in the initial thread window: for the trigger itself, its two nearest neighbours, other window messages, and stub previews. */
 const TRIGGER_CHARS = 4000, NEAR_CHARS = 1200, WINDOW_CHARS = 400, STUB_CHARS = 50
@@ -53,6 +56,9 @@ export interface AssessorHost {
   readonly deployment: Deployment
   /** Durable effect queue through which candidate assessments are delivered. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
+  placementContext?(): PlacementContext
+  /** Previously accepted decision, for replay before live candidate/current-policy validation. */
+  accepted?(triggerId: string): { ticketId: string; reason: string } | undefined
   settings(): Settings
   /** Whether processing is paused, which holds candidate deliveries. */
   paused(): boolean
@@ -205,6 +211,9 @@ export class MasterAssessor implements Assessor {
         ...context.next ? { next_cursor: context.next } : {}, messages }
     })() : { error: error ?? 'Call orchestrator_eval to load initial context', complete: false }
     const settings = this.host.settings()
+    const placement = this.host.placementContext?.()
+    const placementContext = placement && JSON.stringify(placement).length <= 8000 ? placement : {
+      ...(placement ? { version: placement.version, instructionRevision: placement.instructionRevision } : {}), read: 'placement' }
     const others = candidate.triggers.filter(item => item.id !== trigger.id)
     return { trigger_id: trigger.id, strength: candidate.strength, mode: settings.eval.mode,
       source: { kind: trigger.source, actor: trigger.actor.id, thread: threadKey(trigger.threads[0]!), ...(trigger.url
@@ -216,6 +225,7 @@ export class MasterAssessor implements Assessor {
       }) } : {},
       // The rules are in the main Session's Policy section, which names the version the candidate's Eval was built from.
       ...relatedTickets(candidate.tickets), policy_version: candidate.policyVersion,
+      placement: placementContext,
       thread }
   }
   /**
@@ -270,8 +280,14 @@ export class MasterAssessor implements Assessor {
   }
   /** Converts the assessment into an outcome under current settings and passes it to `Engine.decide` for policy verification. */
   async decide(triggerId: string, result: z.infer<typeof AssessmentSchema>, signal?: AbortSignal): Promise<{ state: string; ticket_id?: string; reason: string }> {
-    const { candidate } = this.evalFor(triggerId)
     signal?.throwIfAborted()
+    // Replays preserve the original result even after the evaluation finishes or settings change.
+    const accepted = result.decision === 'accept' ? this.host.accepted?.(triggerId) : undefined
+    if (accepted) {
+      PoolPlacementSchema.parse(result.placement)
+      return { state: 'accept', ticket_id: accepted.ticketId, reason: accepted.reason }
+    }
+    const { candidate } = this.evalFor(triggerId)
     let outcome: AssessmentOutcome = assessmentOutcome(result, this.host.settings(), candidate.strength)
     if (outcome.kind === 'accept' && outcome.acknowledgement) outcome = { ...outcome, acknowledgement: checkedImText(outcome.acknowledgement) }
     const decision = this.host.engine.decide(triggerId, { ...outcome, evalId: candidate.evalId })

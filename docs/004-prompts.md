@@ -88,6 +88,14 @@ These apply [000 Philosophy](000-philosophy.md) to the agents:
 - **Handle reviews by outcome.** A fixed and verified comment is resolved silently; a declined one gets one sentence of reason. An automated reviewer's thread is resolved once it has an answer, and each automated reviewer gets at most three rounds per pull request.
 - **Yield to duplicate work.** When a person's branch or pull request already contains the Ticket's change, the Executor closes its own pull request with one sentence pointing to theirs.
 
+## Semantic pool placement
+
+Before accepting explicit or proactive work, the main Session reads `orchestrator_read placement` (also supplied in proactive assessment context). This bounded resource contains only operator-authored pool-selection instructions, pool IDs/descriptions, an immutable context version and its exact instruction revision. It excludes directory paths/inventory, occupancy, eligibility, worker-slot limits/usage and queue lengths.
+
+Both existing acceptance tools require nested `placement: { poolId, reason, contextVersion }`. Select by Ticket requirements and the instructions; choose `default` when no operator-configured pool is selected, not when another pool is busy. Empty fixed inventory is still a valid semantic choice. Stale/unknown context or pool refuses new acceptance without consuming the candidate; reread the resource and retry. A well-formed replay returns the original placement before current-context validation. Semantic changes publish a new retained snapshot; operational inventory and worker-slot changes do not.
+
+Acceptance records a short branch name and assignment, not a directory path. The Executor reserves a directory, prepares it and manages the lease independently. Workers never change pool placement. Retries/resumption retain the original selection and durable directory affinity; lease release is not directory deletion.
+
 ## Versions
 
 - Each save creates an immutable version containing the full configuration, revision number, predecessor, timestamp and origin (panel or tool). Restoring a version or defaults creates another version.

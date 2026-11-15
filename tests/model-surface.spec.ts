@@ -13,6 +13,7 @@ import { promptParts } from '../src/app/prompts.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { Runtime } from '../src/app/runtime.ts'
+import { PlacementContexts } from '../src/app/placement.ts'
 import { workerSessionId } from '../src/executor/dsh.ts'
 import { Store } from '../src/app/store.ts'
 import { Commands } from '../src/infra/commands.ts'
@@ -37,7 +38,9 @@ interface Skill { name: string; description: string; content: string }
  * Maximum combined character count of system prompt and tool definitions per role (~5% above baseline).
  * Lower this limit when shrinking model-facing text; raise it only intentionally and explain why in the commit message.
  */
-const BUDGET: Record<Role, number> = { orchestrator: 59_000, worker: 40_500 }
+// Placement's required nested acceptance fields and semantic discovery/settings schemas raise the measured main surface to ~60k.
+// Keep ~5% headroom for this explicit contract expansion; the worker surface did not need a larger budget.
+const BUDGET: Record<Role, number> = { orchestrator: 63_000, worker: 40_500 }
 const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
 const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
 const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'
@@ -93,14 +96,15 @@ async function start() {
     const argv = [...spec.argv]
     while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
     const collected = { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') }
-    return { done: Promise.resolve({ exitCode: 0, signal: null }), collected }
+    const done = Promise.resolve({ exitCode: 0, signal: null })
+    return { done, waitForExit: async () => await done, collected }
   } }
-  const agents = new Map<string, { status: string }>()
+  const agents: Map<string, { status: string }> & { list: () => { status: string }[] } = Object.assign(new Map<string, { status: string }>(), { list: () => [...agents.values()] })
   const tools = new Map<string, Map<string, Tool>>()
   const sections = new Map<string, Section>()
   const skills = new Map<string, Skill[]>()
   const inputs: { sessionId: string; text: string }[] = []
-  const create = async ({ sessionId }: { sessionId: string }) => {
+  const create = async ({ sessionId, workspaceId, directory: cwd }: { sessionId: string; workspaceId?: string; directory?: string }) => {
     if (agents.has(sessionId)) return
     const agentCtx = new Context()
     const own = new Map<string, Tool>(), registered: Skill[] = []
@@ -123,14 +127,19 @@ async function start() {
     const deliver = (queue: UserMessage[]) => (message: UserMessage) => {
       queue.push(message); record(message); agents.get(sessionId)!.status = 'running'
     }
-    const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: () => {} }
+    const session = { id: sessionId, header: { cwd: cwd ?? workspaceId }, snapshotEvents: () => [], requestHeader: () => undefined, append: () => {} }
     agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver(inbox.nextTurn), steer: deliver(inbox.nextStep),
       inject: record, status: 'idle', cancel: () => {}, whenIdle: async () => {}, session } as never)
   }
   const resolveAgent = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
   const ctx = new Context()
   const history = { read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} }
-  const services = { agents, llm: { resolveCallConfig: async (value: unknown) => value },
+  // No real subprocesses run in this host. The explicit supervisor double owns every simulated execution range.
+  const contained = new Set<string>()
+  const services = { executionDirectorySafety: { processes: {
+    contain: async (lease: { id: string }) => { const owner = `model-fixture/${lease.id}`; contained.add(owner); return owner },
+    proveQuiescent: async (_lease: unknown, owner: string) => contained.has(owner) ? `Fixture supervisor verified ${owner} empty` : undefined,
+  } }, agents, llm: { resolveCallConfig: async (value: unknown) => value },
     workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) },
     sessionController: { create, resolveAgent, selectModel: async () => {}, rename: async () => {}, inspect: async () => ({ events: [] }) },
     sessionPersistence: { flush: async () => {}, open: async () => history }, permissionPresets: { set: () => {} }, subprocess,
@@ -148,8 +157,20 @@ async function start() {
   const feishuSource = { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } }
   runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: allowed }, eval: { ...settings.eval, mode: 'auto' },
     sources: { ...settings.sources, feishu: feishuSource } })
-  const run = async (sessionId: string, name: string, args: unknown) =>
-    await tools.get(sessionId)!.get(name)!.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
+  const run = async (sessionId: string, name: string, args: unknown) => {
+    const placement = { poolId: 'default', reason: 'No operator pool selected', contextVersion: new PlacementContexts(runtime.store).current().version }
+    const input = args as Record<string, unknown>
+    const prepared = name === 'orchestrator_route' ? { ...input, decisions: (input.decisions as Record<string, unknown>[]).map(item => item.kind === 'accept' && !item.placement ? { ...item, placement } : item) }
+      : name === 'orchestrator_eval_decide' && input.decision === 'accept' && !input.placement ? { ...input, placement } : input
+    const result = await tools.get(sessionId)!.get(name)!.execute(prepared, { signal: new AbortController().signal }) as Record<string, unknown>
+    const ticketId = sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
+    if (ticketId && runtime.store.tickets.get(ticketId)?.ended) {
+      const agent = agents.get(sessionId)!
+      agent.status = 'idle'
+      ctx.emit('agent/status', { agent, status: 'idle' } as never)
+    }
+    return result
+  }
   const stop = async () => { await runtime.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) }
   return { ctx, runtime, agents, tools, sections, skills, inputs, run, stop }
 }
@@ -183,6 +204,7 @@ async function drive(host: Host) {
   const b = proactive.ticket_id
   await runtime.idle()
   const [workerA, workerB] = [a, b].map(workerSessionId) as [string, string]
+  expect(host.agents.has(workerB), JSON.stringify({ ticket: runtime.store.tickets.get(b), blocker: runtime.executor.directories.status(b), queue: runtime.store.directories.queue(), leases: runtime.store.directories.leases() })).toBe(true)
   await run(workerA, 'orchestrator_report', { state: 'progress', summary: 'Needs a decision.', human_action: 'Desktop too?' })
   await run(workerA, 'orchestrator_report', { state: 'progress', summary: 'It reads the config.', human_action: null, reply_to_trigger_id: request.id })
   const other = feishu('9', '@bot 顺便看看这个')

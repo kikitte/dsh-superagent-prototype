@@ -3,7 +3,7 @@
  * allowed member Alice (`ou_alice`), listened chat `oc_team`, and `auto` eval mode. Stop it with `stop()`.
  */
 import { Context } from '@deepseek-ai/cordis'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { vi, type Mock } from 'vitest'
@@ -175,13 +175,17 @@ export async function startRuntime(seed?: (store: Store) => void) {
   }
   /** A prepare command (`sh -c`) waits for this while it is set. */
   const hooks: { prepare?: Promise<void> } = {}
-  const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
+  const subprocess = { spawn: vi.fn((spec: { argv: readonly string[]; env?: Record<string, string> }) => {
     const argv = [...spec.argv]
     while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
     const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
     const exited = { exitCode: 0, signal: null }
-    const done = argv[0] === 'sh' && hooks.prepare ? hooks.prepare.then(() => exited) : Promise.resolve(exited)
-    return { done, collected: { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') } }
+    // A successful fake creation hook implements the real contract: it creates its reserved absent target.
+    const done = (argv[0] === 'sh' && hooks.prepare ? hooks.prepare : Promise.resolve()).then(() => {
+      if (argv[0] === 'sh' && spec.env?.DSH_SUPERAGENT_DIR) mkdirSync(spec.env.DSH_SUPERAGENT_DIR)
+      return exited
+    })
+    return { done, waitForExit: async () => { await done }, collected: { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') } }
   }) }
   const agents = new Map<string, FakeAgent>()
   /** Each Session's next step, which takes the messages that wait for one. */
@@ -191,7 +195,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   let http!: HttpHandler
   const resolveDefault = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
   const controller = {
-    create: vi.fn(async ({ sessionId }: { sessionId: string }) => {
+    create: vi.fn(async ({ sessionId, workspaceId, directory: cwd }: { sessionId: string; workspaceId?: string; directory?: string }) => {
       if (agents.has(sessionId)) return
       const agentCtx = new Context()
       const sessionTools = new Map<string, RegisteredTool>()
@@ -233,7 +237,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
         turn++
         take(true)
       })
-      const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
+      const session = { id: sessionId, header: { cwd: cwd ?? workspaceId }, snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
       let status = 'idle'
       const idle: (() => void)[] = []
       // A cancel drops the inbox unless kept, and the turn it stops ends a moment later, which DSH says.
@@ -261,9 +265,18 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const webServer = { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }
   const jobs = jobRegistry(id => agents.get(id))
   const subagents = subagentRuntime(agents)
-  const services = { agents, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
+  const services = { agents: Object.assign(agents, { list: () => [...agents.values()] }), llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
     sessionQuery: query, sessionPersistence: persistence, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer,
-    jobs: jobs.service, subagents: subagents.service }
+    jobs: jobs.service, subagents: subagents.service,
+    // Explicit simulated external owner: this fixture never spawns worker OS processes.
+    executionDirectorySafety: { processes: {
+      contain: async (lease: { id: string }) => `simulated-range:${lease.id}`,
+      proveQuiescent: async (lease: { ticketId: string; id: string }, owner: string) => {
+        const activeJobs = jobs.service.list(`worker-${lease.ticketId}`).some(job => job.status === 'running' || job.status === 'stopping')
+        const activeChildren = (await subagents.service.listDescendants(`worker-${lease.ticketId}`)).some(child => child.activity === 'running')
+        return owner === `simulated-range:${lease.id}` && !activeJobs && !activeChildren ? 'Simulated external owner verified no fake process activity' : undefined
+      },
+    } } }
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   for (const cli of [AGENT, BOT]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
@@ -288,11 +301,21 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const runTool = async (sessionId: string, name: string, args: unknown) => {
     const tool = tools.get(sessionId)?.get(name)
     if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
-    return await tool.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
+    const result = await tool.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
+    const ticketId = sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
+    if (ticketId && runtime.store.tickets.get(ticketId)?.ended) {
+      const agent = agents.get(sessionId)!
+      agent.status = 'idle'
+      ctx.emit('agent/status', { agent, status: 'idle' } as never)
+    }
+    return result
   }
   /** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
   async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
+    const context = item.kind === 'accept' && item.placement === undefined
+      ? await runTool(runtime.masterId, 'orchestrator_read', { resource: 'placement' }) as { version: string } : undefined
+    const decision = context ? { ...item, placement: { poolId: 'default', reason: 'Default semantic match', contextVersion: context.version } } : item
+    const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [decision] }) as { results: Record<string, unknown>[] }
     if (results[0]!.refused) throw new Error(String(results[0]!.refused))
     return results[0]!
   }

@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
-import { UserError } from '../src/core/index.ts'
+import { UserError, key } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
@@ -13,8 +13,83 @@ let h: Host
 beforeEach(async () => { h = await startRuntime() })
 afterEach(async () => { await h.stop() })
 const words = (count: number) => Array.from({ length: count }, () => 'word').join(' ')
+const placement = async () => ({ poolId: 'default', reason: 'Default semantic match', contextVersion: ((await read('placement')) as { version: string }).version })
 const read = (resource: string, page: { offset?: number; limit?: number } = {}) =>
   h.runTool(h.runtime.masterId, 'orchestrator_read', { resource, ...page })
+
+it('refuses missing, malformed and stale explicit placement per item, then replays original placement after settings change', async () => {
+  const request = feishu('placement', '@bot 修一下这个'), thanks = feishu('placement-thanks', '@bot 谢谢')
+  h.runtime.receive(request); h.runtime.receive(thanks); await h.runtime.idle()
+  const current = await placement()
+  const registered = h.tools.get(h.runtime.masterId)!.get('orchestrator_route') as unknown as {
+    parameters: { properties: { decisions: { items: { properties: { placement: { required: string[]; additionalProperties: boolean } } } } } }
+  }
+  expect(registered.parameters.properties.decisions.items.properties.placement).toMatchObject({
+    required: ['poolId', 'reason', 'contextVersion'], additionalProperties: false,
+  })
+  const accept = { kind: 'accept', trigger_id: request.id, title: 'Fix', worktree_name: 'fix-placement', acknowledgement: '收到。' }
+  const run = (decisions: unknown[]) => h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions })
+  const refused = await run([accept, { ...accept, placement: { ...current, directory: '/arbitrary' } },
+    { ...accept, placement: { ...current, contextVersion: 'unknown' } }, { ...accept, placement: { ...current, poolId: 'unknown' } },
+    { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks' }])
+  expect(refused.results).toEqual([
+    expect.objectContaining({ refused: 'accept needs placement' }), expect.objectContaining({ refused: expect.stringMatching(/^placement:/) }),
+    expect.objectContaining({ refused: expect.stringContaining('stale or unknown') }),
+    expect.objectContaining({ refused: expect.stringContaining('Unknown execution directory pool') }), expect.objectContaining({ decision: 'ignore' }),
+  ])
+  expect(h.runtime.engine.candidate(request.id)).toBeDefined()
+  expect(h.runtime.store.tickets.list()).toEqual([])
+  expect(h.runtime.store.replyStatus(key('ack', request.id))).toBeUndefined()
+  const first = await run([{ ...accept, placement: current }])
+  const ticketId = (first.results as { ticket: { ticket_id: string } }[])[0]!.ticket.ticket_id
+  const original = h.runtime.store.tickets.get(ticketId)!
+  expect(original.placement).toEqual(current)
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, placementInstructions: 'Changed instructions' } })
+  const replay = await run([{ ...accept, placement: { poolId: 'retired', reason: 'different', contextVersion: 'stale' } }])
+  expect(replay.results).toMatchObject([{ ticket: { ticket_id: ticketId } }])
+  expect(h.runtime.store.tickets.get(ticketId)!.placement).toEqual(original.placement)
+  expect(h.runtime.store.tickets.list()).toHaveLength(1)
+})
+
+it('replays proactive acceptance with its original recorded reason and placement before current settings validation', async () => {
+  const request = feishu('proactive-placement', '把副标题改成“浏览网页”', { mentions: [] })
+  h.runtime.receive(request); await h.runtime.idle()
+  const result = { trigger_id: request.id, decision: 'accept', title: 'Copy fix', worktree_name: 'copy-fix', scope: 'Subtitle wording',
+    reason: 'The requested subtitle text is specified.', intent_evidence: '把副标题改成“浏览网页”', placement: await placement(),
+    direction: { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'The request supplies replacement text.' },
+    rule_assessments: [{ rule_id: 'copy', matched: true, reason: 'Copy change' }, { rule_id: 'visual', matched: false, reason: 'No visual change' }] }
+  const first = await h.runTool(h.runtime.masterId, 'orchestrator_eval_decide', result)
+  expect(first).toMatchObject({ decision: 'accept', reason: result.reason })
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, eval: { ...settings.eval, mode: 'off' }, policy: { ...settings.policy, rules: [] },
+    executor: { ...settings.executor, placementInstructions: 'New instructions' } })
+  const replay = await h.runTool(h.runtime.masterId, 'orchestrator_eval_decide', { ...result,
+    placement: { poolId: 'retired', reason: 'Different selection', contextVersion: 'stale' } })
+  expect(replay).toMatchObject({ decision: 'accept', reason: result.reason,
+    ticket: { ticket_id: (first.ticket as { ticket_id: string }).ticket_id, placement: result.placement } })
+  expect(h.runtime.store.tickets.list()).toHaveLength(1)
+})
+
+it('bounds placement discovery pages and follows immutable snapshots across semantic settings changes', async () => {
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, placementInstructions: 'UI instructions. '.repeat(600),
+    directory: '/private/root', prepare: 'private prepare hook' } })
+  const first = await read('placement', { limit: 100 }) as { version: string; text: string; next_offset: number; resource: string }
+  expect(first.text.length).toBeLessThanOrEqual(100)
+  expect(first.resource).toBe(`placement/${first.version}`)
+  h.runtime.store.saveSettings({ ...h.runtime.store.settings(), executor: { ...h.runtime.store.settings().executor,
+    placementInstructions: 'New instructions' } })
+  let body = first.text, offset: number | null = first.next_offset
+  while (offset !== null) {
+    const page = await read(first.resource, { offset, limit: 8000 }) as { text: string; next_offset: number | null }
+    body += page.text; offset = page.next_offset
+  }
+  const snapshot = JSON.parse(body)
+  expect(snapshot).toMatchObject({ version: first.version, instructions: 'UI instructions. '.repeat(600) })
+  expect(body).not.toMatch(/private|"directory":|"prepare":|maxWorkers|allocation/)
+  expect((await read('placement')).version).not.toBe(first.version)
+})
 
 it('reads the lists, a ticket, a decision, the settings, the prompts and the models as resources', async () => {
   const { ticket, trigger } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
@@ -93,10 +168,12 @@ it('saves with the prompt save tool an override without its base, refuses a part
 
 it('keeps the main Session\'s resources from an Executor Session, which lists only its own', async () => {
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
-  for (const resource of ['tickets', 'triggers', 'threads', 'decisions', 'settings', 'prompts', 'models']) {
+  for (const resource of ['tickets', 'triggers', 'threads', 'decisions', 'placement', `placement/${ticket.placement.contextVersion}`, 'settings', 'prompts', 'models']) {
     await expect(h.runTool(sessionId, 'orchestrator_read', { resource })).rejects.toThrow('belongs to the main Session')
   }
-  expect(await h.runTool(sessionId, 'orchestrator_read', { resource: `ticket/${ticket.id}` })).toMatchObject({ ticket_id: ticket.id })
+  const own = await h.runTool(sessionId, 'orchestrator_read', { resource: `ticket/${ticket.id}` })
+  expect(own).toMatchObject({ ticket_id: ticket.id, placement: ticket.placement })
+  expect(own).not.toHaveProperty('placement_context')
   type Registered = { description: string; parameters: { properties: { resource: { description: string } } } }
   const registered = h.tools.get(sessionId)!.get('orchestrator_read') as unknown as Registered
   const offered = registered.description + registered.parameters.properties.resource.description
@@ -148,7 +225,7 @@ it('routes several triggers in one call, in order, and answers a refused or fail
     { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.' },
     // A stop without its ticket is refused, alone.
     { kind: 'stop', trigger_id: request.id },
-    { kind: 'accept', trigger_id: request.id, title: 'Other', worktree_name: 'fix-other', acknowledgement: '收到。' },
+    { kind: 'accept', placement: await placement(), trigger_id: request.id, title: 'Other', worktree_name: 'fix-other', acknowledgement: '收到。' },
     { kind: 'attach', trigger_id: other.id, ticket_id: 'no-such-ticket' },
     { kind: 'attach', trigger_id: more.id, ticket_id: ticket.id },
   ] }) as { results: Record<string, unknown>[] }
@@ -168,7 +245,7 @@ it('refuses alone an item that lacks a field its kind needs or breaks a field\'s
   for (const trigger of triggers) h.runtime.receive(trigger)
   await h.runtime.idle()
   const [a, b, c, d, e] = triggers.map(trigger => trigger.id) as [string, string, string, string, string]
-  const accept = { kind: 'accept', title: 'Fix', acknowledgement: '收到。' }
+  const accept = { kind: 'accept', placement: await placement(), title: 'Fix', acknowledgement: '收到。' }
   const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
     { ...accept, trigger_id: a },
     { ...accept, trigger_id: b, worktree_name: 'one-two-three-four-five' },
@@ -193,7 +270,7 @@ it('decides a candidate\'s batch with its card\'s trigger: a second accept keeps
   h.runtime.receive(first); h.runtime.receive(second)
   await h.runtime.settings.pause(false, 'panel')
   await h.runtime.pump(); await h.runtime.idle()
-  const accept = { kind: 'accept', worktree_name: 'retitle', acknowledgement: '收到。' }
+  const accept = { kind: 'accept', placement: await placement(), worktree_name: 'retitle', acknowledgement: '收到。' }
   const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
     { ...accept, trigger_id: first.id, title: 'Retitle' },
     { ...accept, trigger_id: second.id, title: 'Another title' },
@@ -202,7 +279,7 @@ it('decides a candidate\'s batch with its card\'s trigger: a second accept keeps
   const ticketId = results[0]!.ticket!.ticket_id
   expect(results).toEqual([
     expect.objectContaining({ trigger_id: first.id, decision: 'accept' }),
-    expect.objectContaining({ trigger_id: second.id, decision: 'accept', reason: `Already accepted as ${ticketId}; title and acknowledgement unchanged` }),
+    expect.objectContaining({ trigger_id: second.id, decision: 'accept', reason: `Already accepted as ${ticketId}; title, acknowledgement and placement unchanged` }),
     { trigger_id: second.id, kind: 'ignore', refused: `Decided in this call with ${first.id}, whose Decision took its batch` },
   ])
   expect(h.runtime.store.tickets.get(ticketId)!.title).toBe('Retitle')
@@ -237,7 +314,7 @@ it('ignores a proactive candidate from its card beside other decisions, marked s
   const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
     { kind: 'ignore', trigger_id: chat.id, reason: 'Lunch chat.' },
     { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.' },
-    { kind: 'accept', trigger_id: proposal.id, title: 'Shorter title', worktree_name: 'short-title', acknowledgement: '收到。' },
+    { kind: 'accept', placement: await placement(), trigger_id: proposal.id, title: 'Shorter title', worktree_name: 'short-title', acknowledgement: '收到。' },
   ] }) as { results: Record<string, unknown>[] }
   expect(results).toEqual([
     { trigger_id: chat.id, kind: 'ignore', decision: 'ignore', reason: 'Ignored from its card, without a rule assessment; Lunch chat.' },
@@ -338,7 +415,8 @@ it('reads a ticket with the ids it is tied to, its reports by assignment, and it
   expect(await read(details.assignments.next_resource!, { offset: 6 })).toEqual({ next_offset: null,
     items: [expect.objectContaining({ id: 'a1', report: expect.objectContaining({ read: `ticket/${ticket.id}/report/a1` }) })] })
   expect(await h.runTool(sessionId, 'orchestrator_read', { resource: `ticket/${ticket.id}/report/a1` })).toMatchObject({ text: report(1).summary })
-  expect(JSON.stringify(details).length).toBeLessThan(3000)
+  // Includes immutable placement/context audit metadata, but no semantic snapshot body.
+  expect(JSON.stringify(details).length).toBeLessThan(3600)
   const page = await read(details.inputs.items[0]!.read!) as { text: string }
   expect(page.text).toContain('check the margin on mobile as well.')
   // An Input also reads by the id it has on the ticket.

@@ -1,11 +1,11 @@
 /** Execution status view (active Tickets and pause control) and Execution settings group (Executor capacity and workspace environment). */
 import { useRef, useState } from 'react'
-import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
+import { TICKET_FILTERS, type ApiResponse, type TicketFilter } from '../app/api.ts'
 import { LIMITS } from '../limits.ts'
 import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
-import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
+import { Button, DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
-import { usePanel } from './provider.tsx'
+import { useAction, usePanel } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
 import { ConfigHistory, Field, Fields, ModelField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { localized } from './text.ts'
@@ -72,6 +72,101 @@ function EnvironmentVariables({ groups, sources,
     </div>
   </DisclosureRow>
 }
+function DirectoryRecovery({ lease, reload }: {
+  lease: NonNullable<ApiResponse<'GET directories'>[number]['lease']>
+  reload: () => Promise<void>
+}) {
+  const { t, call } = usePanel()
+  const [result, setResult] = useState<string>()
+  const recheck = useAction(async () => {
+    const checked = await call('POST directory-leases/:id/recheck-recovery', { id: lease.id, body: { executionEpoch: lease.executionEpoch } })
+    setResult(checked.detail)
+  }, { reload })
+  return <>
+    <LabelValue label={t('directoryExecutionEpoch')} value={lease.executionEpoch} />
+    <LabelValue label={t('directoryProcessOwner')} value={lease.processOwner ?? t('directoryNoProcessOwner')} />
+    {lease.quiescence && <LabelValue label={t('directoryQuiescence')} value={`${lease.quiescence.at} · ${lease.quiescence.evidence}`} />}
+    {lease.recovery !== 'cleared' && <>
+      <Hint>{t('directoryRecoveryHint')}</Hint>
+      <Button variant="outline" size="sm" disabled={recheck.busy} onClick={() => { void recheck.run() }}>{t('directoryRecheckRecovery')}</Button>
+    </>}
+    {result && <Hint>{result}</Hint>}
+  </>
+}
+function DirectoryDiagnostics() {
+  const { t, call } = usePanel()
+  const [open, setOpen] = useState(false)
+  const { data, error, reload } = usePoll(() => open ? call('GET directories') : Promise.resolve(undefined), [open])
+  const [pool, setPool] = useState('')
+  const refresh = useAction(() => call('POST directories/refresh'), { reload })
+  const shown = data?.filter(item => !pool || item.directory.poolId === pool)
+  return <DisclosureRow icon={<Icon name="hash" />} title={t('directoryDiagnostics')} open={open} onToggle={() => setOpen(!open)}>
+    <div className="dt-disclosure-body">
+      <Hint>{t('directoryDiagnosticsHint')}</Hint>
+      <Button variant="outline" size="sm" icon={<Icon name="refresh" />} disabled={refresh.busy}
+        onClick={() => { void refresh.run() }}>{t('directoryRefresh')}</Button>
+      <Field label={t('directoryPoolFilter')}><select className="dt-select" value={pool} onChange={event => setPool(event.target.value)}>
+        <option value="">{t('directoryAllPools')}</option>
+        {[...new Set(data?.map(item => item.directory.poolId))].sort().map(id => <option key={id} value={id}>{id}</option>)}
+      </select></Field>
+      <LoadState error={error} loading={!data} />
+      {shown && (shown.length ? <ul className="dt-list">{shown.map(({ directory, lease, git, occupancy, blocker }) => <li key={directory.id} className="dt-form dt-block">
+        <strong className="dt-mono">{directory.poolId} / {directory.id}{directory.retired ? ` · ${t('directoryRetired')}` : ''}</strong>
+        <code>{directory.path}</code>
+        <LabelValue label={t('directoryLease')} value={lease ? `${lease.ticketId} · ${lease.state} · ${lease.recovery}` : t('directoryUnleased')} />
+        {lease && <LabelValue label={t('directoryPreparation')} value={lease.preparation.state} />}
+        {lease?.recycling && <LabelValue label={t('directoryRecycling')} value={lease.recycling.state} />}
+        {lease && <DirectoryRecovery key={lease.id} lease={lease} reload={reload} />}
+        {directory.poolId !== 'default' ? <><LabelValue label={t('directoryOccupancy')} value={occupancy.state} /><Hint>{occupancy.detail}</Hint></> : <Hint>{t('directoryDedicatedNoReuseGate')}</Hint>}
+        {git && <pre className="dt-detail dt-mono">{JSON.stringify(git, null, 2)}</pre>}
+        {blocker && <p className="dt-error">{blocker}</p>}
+      </li>)}</ul> : <Hint>{t('none')}</Hint>)}
+    </div>
+  </DisclosureRow>
+}
+type Pool = SettingsView['blocks']['executor']['value']['directoryPools'][number]
+const nextId = (prefix: string, ids: string[]) => { let n = 1; while (ids.includes(`${prefix}-${n}`)) n++; return `${prefix}-${n}` }
+function PoolEditor({ pool, saved, pools, onChange, onRemove, onMove }: {
+  pool: Pool; saved: Pool | undefined; pools: Pool[]; onChange: (pool: Pool) => void; onRemove: () => void
+  onMove: (directory: Pool['directories'][number], poolId: string) => void
+}) {
+  const { t } = usePanel()
+  const [editing, setEditing] = useState(!saved)
+  const set = (next: Partial<Pool>) => onChange({ ...pool, ...next })
+  return <section className="dt-form dt-card" aria-label={pool.id}>
+    <div className="dt-subhead"><strong className="dt-mono">{pool.id}</strong><span className="dt-subhead-actions">
+      <Button variant="ghost" size="sm" onClick={() => setEditing(!editing)}>{t(editing ? 'collapse' : 'poolEdit')}</Button>
+      <ConfirmButton label={t('poolRemove')} title={t('poolRemove')} message={t('poolRemoveConfirm', { id: pool.id })}
+        onConfirm={async () => onRemove()} />
+    </span></div>
+    {!editing ? <Hint>{pool.description} · {t('poolDirectoryCount', { count: pool.directories.length })}</Hint> : <>
+      <Field label={t('poolId')}><Input required pattern="[a-zA-Z0-9_-]{1,80}" value={pool.id} readOnly={!!saved}
+        onChange={event => set({ id: event.target.value })} /></Field>
+      <Field label={t('poolDescription')}><textarea className="dt-textarea" rows={2} required maxLength={2000} value={pool.description}
+        onChange={event => set({ description: event.target.value })} /></Field>
+      <Hint>{t('fixedPoolPolicy')}</Hint>
+      <Field label={t('poolPrepare')} hint={t('poolPrepareHint')}><textarea className="dt-textarea dt-mono" rows={3}
+        maxLength={LIMITS.prepareCommand} value={pool.prepare} spellCheck={false} onChange={event => set({ prepare: event.target.value })} /></Field>
+      <Field label={t('poolRecycle')} hint={t('poolRecycleHint')}><textarea className="dt-textarea dt-mono" rows={3}
+        maxLength={LIMITS.prepareCommand} value={pool.recycle} spellCheck={false} onChange={event => set({ recycle: event.target.value })} /></Field>
+      {pool.directories.map((directory, index) => <div className="dt-form dt-block" key={index}>
+        <Field label={t('directoryId')}><Input required pattern="[a-zA-Z0-9_-]{1,80}" value={directory.id}
+          readOnly={!!saved?.directories.some(item => item.id === directory.id)} onChange={event => set({ directories: pool.directories.map((item, at) => at === index ? { ...item, id: event.target.value } : item) })} /></Field>
+        <Field label={t('directoryPoolMembership')}><select className="dt-select" value={pool.id}
+          onChange={event => onMove(directory, event.target.value)}>
+          {pools.map(item => <option key={item.id} value={item.id}>{item.id}</option>)}
+        </select></Field>
+        <Field label={t('directoryPath')}><Input className="dt-mono" required pattern="/.*" value={directory.path} spellCheck={false}
+          onChange={event => set({ directories: pool.directories.map((item, at) => at === index ? { ...item, path: event.target.value } : item) })} /></Field>
+        <ConfirmButton label={t('directoryRemove')} title={t('directoryRemove')} message={t('directoryRemoveConfirm', { id: directory.id })}
+          onConfirm={async () => set({ directories: pool.directories.filter((_, at) => at !== index) })} />
+      </div>)}
+      {!pool.directories.length && <Hint>{t('poolEmptyInventory')}</Hint>}
+      <Button variant="outline" size="sm" icon={<Icon name="plus" />} onClick={() => set({ directories: [...pool.directories,
+        { id: nextId(`${pool.id}-directory`, pool.directories.map(item => item.id)), path: '' }] })}>{t('directoryAdd')}</Button>
+    </>}
+  </section>
+}
 export function ExecutionSettings() {
   const { t } = usePanel()
   const { blocks, environment, sources } = useSettings().settings
@@ -102,6 +197,27 @@ export function ExecutionSettings() {
           </Field>
         </div>
         <div className="dt-form dt-block">
+          <h2 className="dt-block-title">{t('directoryPools')}</h2>
+          <Field label={t('placementInstructions')} hint={t('placementInstructionsHint')}>
+            <textarea className="dt-textarea" rows={4} maxLength={16000} value={value.placementInstructions}
+              onChange={event => edit({ placementInstructions: event.target.value })} />
+          </Field>
+          <Section title={t('defaultPool')} hint={t('defaultPoolHint')}>
+            <Field label={t('defaultPoolDescription')}><textarea className="dt-textarea" rows={2} required maxLength={2000}
+              value={value.defaultPoolDescription} onChange={event => edit({ defaultPoolDescription: event.target.value })} /></Field>
+          </Section>
+          <Hint>{t('registrationNoFilesystem')}</Hint>
+          {value.directoryPools.map((pool, index) => <PoolEditor key={index} pool={pool} pools={value.directoryPools}
+            onMove={(directory, target) => edit({ directoryPools: value.directoryPools.map(item => item.id === pool.id && target !== pool.id
+              ? { ...item, directories: item.directories.filter(entry => entry.id !== directory.id) }
+              : item.id === target && target !== pool.id ? { ...item, directories: [...item.directories, directory] } : item) })}
+            saved={executor.directoryPools.find(item => item.id === pool.id)}
+            onChange={next => edit({ directoryPools: value.directoryPools.map((item, at) => at === index ? next : item) })}
+            onRemove={() => edit({ directoryPools: value.directoryPools.filter((_, at) => at !== index) })} />)}
+          <Button variant="outline" size="sm" icon={<Icon name="plus" />} onClick={() => edit({ directoryPools: [...value.directoryPools,
+            { id: nextId('pool', value.directoryPools.map(pool => pool.id)), description: '', directories: [], prepare: '', recycle: '' }] })}>{t('poolAdd')}</Button>
+        </div>
+        <div className="dt-form dt-block">
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
           <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
             : t('executionDirectoryDefault', { root: environment.root })}>
@@ -122,6 +238,7 @@ export function ExecutionSettings() {
       </Fields>
       <SaveBar {...draft} onDiscard={draft.discard} />
     </form>
+    <DirectoryDiagnostics />
     <ConfigHistory blocks={['executor', 'pause']} />
   </div>
 }

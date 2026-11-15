@@ -3,6 +3,8 @@ import { z } from 'zod'
 import { registerHttp, sameOrigin } from '../src/app/http.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
+import { DirectorySettingsError } from '../src/app/directory-settings.ts'
+import { DirectoryRecoveryConflict } from '../src/executor/directories.ts'
 import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
@@ -25,6 +27,45 @@ function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.
   }
 }
 
+it('refreshes operator directory diagnostics read-only without manufacturing unknown safety as clear', async () => {
+  const diagnostics = [{ directory: { id: 'ui-1', poolId: 'ui', path: '/srv/ui-1', lastLeaseSequence: 0, createdAt: '' },
+    occupancy: { state: 'unknown', revision: 'unsupported', detail: 'Authoritative admission is unavailable' } }]
+  let reads = 0, wakes = 0, passes = 0
+  const call = serve({ executor: { directories: { diagnostics: async () => { reads++; return diagnostics } }, wake: () => { wakes++ } }, requestPass: () => { passes++ } })
+  expect(await call('GET', 'directories')).toEqual({ status: 200, body: diagnostics })
+  expect(reads).toBe(1)
+  expect([wakes, passes]).toEqual([0, 0])
+  expect(await call('POST', 'directories')).toEqual({ status: 404, body: { error: 'Unknown operation' } })
+  expect(reads).toBe(1)
+  expect(await call('POST', 'directories/refresh')).toEqual({ status: 200, body: diagnostics })
+  expect([reads, wakes, passes]).toEqual([2, 1, 1])
+})
+
+it('rechecks the reviewed lease through trusted recovery and wakes only the Executor after clearance', async () => {
+  const checked: unknown[] = [], wakes: number[] = []
+  let cleared = false, conflict = false, passes = 0
+  const call = serve({ executor: { directories: { recheckRecovery: async (...args: unknown[]) => {
+    checked.push(args)
+    if (conflict) throw new DirectoryRecoveryConflict()
+    return { cleared, detail: cleared ? 'Verified' : 'No proof; quarantine retained' }
+  } }, wake: () => { wakes.push(1) } }, requestPass: () => { passes++ } })
+  const path = 'directory-leases/lease-1/recheck-recovery'
+  expect(await call('POST', path, { executionEpoch: 'epoch-1' })).toEqual({ status: 200, body: { cleared: false, detail: 'No proof; quarantine retained' } })
+  expect(checked).toEqual([['lease-1', 'epoch-1']]); expect(wakes).toHaveLength(0)
+  for (const body of [{}, { executionEpoch: '' }, { executionEpoch: 'epoch-1', evidence: 'Operator says safe' }, { executionEpoch: 'epoch-1', force: true }]) {
+    expect((await call('POST', path, body)).status).toBe(400)
+  }
+  expect(checked).toHaveLength(1)
+  cleared = true
+  expect((await call('POST', path, { executionEpoch: 'epoch-1' })).body).toEqual({ cleared: true, detail: 'Verified' })
+  expect(wakes).toHaveLength(1); expect(passes).toBe(0)
+  conflict = true
+  expect((await call('POST', path, { executionEpoch: 'epoch-1' })).status).toBe(409)
+  expect(wakes).toHaveLength(1)
+  expect((await call('POST', path, { executionEpoch: 'epoch-1' }, { origin: 'https://unrelated.test' })).status).toBe(403)
+  expect(checked).toHaveLength(3)
+})
+
 it('answers each kind of failure with its own status', async () => {
   const saves: unknown[] = []
   const call = serve({
@@ -36,6 +77,7 @@ it('answers each kind of failure with its own status', async () => {
       if (args[1] === 'invalid') z.object({ maxWorkers: z.number() }).parse({})
       if (args[1] === 'refused') throw new SetupError('agentCliUnset')
       if (args[1] === 'broken') throw new Error('disk full')
+      if (args[1] === 'directory') throw new DirectorySettingsError('Pool ui still has unreleased leases')
       return { saved: true, revision: 1, restarting: false }
     } },
   })
@@ -43,10 +85,11 @@ it('answers each kind of failure with its own status', async () => {
   expect(await call('PUT', 'settings/executor', { value: 'invalid', revision: 0 })).toMatchObject({ status: 400, body: { issues: [{ path: 'maxWorkers' }] } })
   expect(await call('PUT', 'settings/source:github', { value: 'refused', revision: 0 })).toMatchObject({ status: 400, body: { setup: { code: 'agentCliUnset', place: 'github' } } })
   expect(await call('PUT', 'settings/executor', { value: 'broken', revision: 0 })).toEqual({ status: 500, body: { error: 'disk full' } })
+  expect(await call('PUT', 'settings/executor', { value: 'directory', revision: 0 })).toEqual({ status: 400, body: { error: 'Pool ui still has unreleased leases' } })
   // Block names are validated before calling settings.save: reject unknown blocks or non-existent Sources.
   expect(await call('PUT', 'settings/pause', { value: {}, revision: 0 })).toMatchObject({ status: 400 })
   expect(await call('PUT', 'settings/source:feishu', { value: {}, revision: 0 })).toEqual({ status: 404, body: { error: 'Source not found' } })
-  expect(saves).toHaveLength(4)
+  expect(saves).toHaveLength(5)
   expect(await call('POST', 'tickets/t9/retry')).toEqual({ status: 404, body: { error: 'Ticket not found' } })
   expect(await call('GET', 'nothing/here')).toEqual({ status: 404, body: { error: 'Unknown operation' } })
   expect(await call('POST', 'executor/pause', 'not json')).toEqual({ status: 400, body: { error: 'The request body is not JSON' } })

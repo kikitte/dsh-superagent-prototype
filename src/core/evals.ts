@@ -1,6 +1,7 @@
 /** Evals: the Thread-level assessments of queued Triggers, and the Decisions they end with. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
+import { validPoolPlacement } from './directories.ts'
 import { liveTicket, threadKey } from './model.ts'
 import type { Decision, DecisionKind, Evaluation, Mandate, MandateBasis, Strength, Thread, Trigger } from './model.ts'
 import type { AssessmentOutcome, Candidate, Policy } from './ports.ts'
@@ -132,7 +133,7 @@ export class Evals extends EnginePart {
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
     const held = this.holding(triggerId)
-    if (outcome.evalId && held?.evaluating?.id !== outcome.evalId) throw new UserError('evalFinished', { eval: outcome.evalId })
+    if (outcome.kind === 'accept' && !validPoolPlacement(outcome.placement)) throw new UserError('invalidPlacement')
     // Prevent a replayed trigger that already created a ticket from spawning a second one.
     const earlier = outcome.kind === 'accept' ? this.accepted(threadKey(trigger.threads[0]!)).get(triggerId) : undefined
     if (earlier) {
@@ -144,6 +145,7 @@ export class Evals extends EnginePart {
       }
       return earlier
     }
+    if (outcome.evalId && held?.evaluating?.id !== outcome.evalId) throw new UserError('evalFinished', { eval: outcome.evalId })
     // A follow-up that reached a ticket is its worker's to judge: the main Session may only stop the work on it.
     if (outcome.kind !== 'stop') this.leftToWorkers(trigger)
     const thread = held ?? this.thread(trigger.threads[0]!)
@@ -304,6 +306,10 @@ export class Evals extends EnginePart {
   }
   /** Record an accept with the Mandate the Eval gives, and have Tickets create its ticket. */
   private accept(thread: Thread, evaluation: Evaluation, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Decision {
+    const context = this.options.validatePlacement?.(outcome.placement)
+    if (context && (context.version !== outcome.placement.contextVersion || !context.pools.some(pool => pool.id === outcome.placement.poolId))) {
+      throw new UserError('stalePlacementContext')
+    }
     const at = this.now()
     const basis = { ...evaluation.basis, ...(outcome.rules ? { rules: outcome.rules } : {}) }
     const { strength, policyVersion, actor } = evaluation
@@ -311,7 +317,7 @@ export class Evals extends EnginePart {
     const ticketId = key('ticket', evaluation.id)
     const audit = outcome.audit ? { audit: outcome.audit } : {}
     const decision = this.finish(thread, evaluation, { kind: 'accept', reason: reasonOf(outcome.reason), ...audit, mandate, ticketId })
-    this.tickets.create(ticketId, decision.id, mandate, evaluation, outcome, at)
+    this.tickets.create(ticketId, decision.id, mandate, evaluation, outcome, at, context)
     return decision
   }
   /** Record an Eval's Decision; the Thread's own Eval ends with it, while a gate-only one leaves the Thread's Eval going. */

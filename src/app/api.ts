@@ -1,5 +1,6 @@
 /** Type-only management API contract between the web panel and host routes, imported by the panel without bundling host code. */
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { DshExecutor } from '../executor/dsh.ts'
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
 import type { HistoryView } from './settings-history.ts'
@@ -23,6 +24,11 @@ export interface Api {
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
   'GET settings': { response: SettingsView }
+  /** Read-only refresh: never cleans, prepares, acquires, releases or asserts missing observation is clear. */
+  'GET directories': { response: Awaited<ReturnType<DshExecutor['directories']['diagnostics']>> }
+  'POST directories/refresh': { response: Awaited<ReturnType<DshExecutor['directories']['diagnostics']>> }
+  /** Only trusted process-owner evidence can clear recovery; no operator-supplied evidence or hook replay. */
+  'POST directory-leases/:id/recheck-recovery': { body: { executionEpoch: string }; response: Awaited<ReturnType<DshExecutor['directories']['recheckRecovery']>> }
   'POST sources/:id/labels': { response: { added: string[] } }
   'GET threads': { query?: Paged & { filter?: ThreadFilter }; response: ThreadListView }
   'GET threads/:key': { query?: { limit?: number; before?: string; around?: string }; response: ThreadDetailView }
