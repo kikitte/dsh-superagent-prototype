@@ -2,6 +2,8 @@
 
 Open **Superagent** in the DeepSeek Harness Web sidebar to supervise the agent. The panel prioritizes work that needs a person, then system health and history. This document builds on [000 Philosophy](000-philosophy.md) through [004 Prompts](004-prompts.md).
 
+**Open main Session** is disabled while deployment setup is incomplete; its tooltip identifies the missing requirement, also shown in Overview. The main Session is created after setup succeeds. A saved Session ID alone does not mean that Session has been created, archived or deleted.
+
 ## Three questions
 
 Opening the panel answers three questions, in this order:

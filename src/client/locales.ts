@@ -100,6 +100,7 @@ const TEXT = {
   // Header, search, and tabs
   panel: ['Superagent', 'Superagent'],
   openMaster: ['打开主 Session', 'Open main Session'],
+  mainSessionWaitingSetup: ['完成部署检查后才能打开主 Session；请到概览查看需要补充的设置。', 'The main Session is available after setup succeeds; see Overview for the required settings.'],
   pagesLabel: ['dsh-superagent 页面', 'dsh-superagent pages'],
   searchPlaceholder: ['搜索工单、线程、触发或链接', 'Search Tickets, Threads, Triggers or links'],
   searchLabel: ['搜索', 'Search'],

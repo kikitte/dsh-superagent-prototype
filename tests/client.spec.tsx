@@ -6,6 +6,7 @@ import { ApiError, caller, usePoll } from '../src/client/api.ts'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
 import { SettingsSchema } from '../src/policy.ts'
+import { SetupError, type SetupProblem } from '../src/setup.ts'
 
 declare global { var IS_REACT_ACT_ENVIRONMENT: boolean }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
@@ -40,11 +41,11 @@ const openMaster = async (container: HTMLElement) => {
   await act(async () => { button.click() })
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
-const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+const serve = (problem: SetupProblem | null = null) => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
   const path = new URL(url, 'http://127.0.0.1').pathname.replace('/orchestrator/api/', '')
   if (path === 'overview') return Response.json({ problems: [], person: [], executor: { running: 0, queued: 0, maxWorkers: 3, idle: 0 }, flow: { triggers: 0, filtered: 0, judged: 0, accepted: 0, evaluating: 0 }, policyVersion: 'v' })
   if (path === 'state') return Response.json({ masterId: 'master', settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
-    setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
+    setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem, feishuProblem: null, accounts: null } })
   return Response.json({ error: 'unavailable' }, { status: 503 })
 }))
 afterEach(() => { vi.unstubAllGlobals() })
@@ -76,6 +77,28 @@ it('reports a Session missing from the catalog in the interface language', async
   expect(ctx.uiWorkspace.openSession).not.toHaveBeenCalled()
   expect(document.body.textContent).toContain(zh.sessionNotListed)
   view.dispose()
+})
+
+it('disables main Session navigation during incomplete setup and explains the required fix', async () => {
+  const problem = new SetupError('repositoryUnset').problem
+  serve(problem)
+  const { ctx, main } = fixture([])
+  const view = await render(main, { t })
+  const button = [...view.container.querySelectorAll('button')].find(item => item.textContent === zh.openMaster)!
+  expect(button.disabled).toBe(true)
+  expect(button.title).toContain(zh.mainSessionWaitingSetup)
+  expect(button.title).toContain(zh['setup.repositoryUnset'])
+  await openMaster(view.container)
+  expect(ctx.sessions.refresh).not.toHaveBeenCalled()
+  expect(ctx.uiWorkspace.openSession).not.toHaveBeenCalled()
+  expect(document.body.textContent).not.toContain(zh.sessionNotListed)
+  view.dispose()
+  serve()
+  const ready = fixture(['master'])
+  const next = await render(ready.main, { t })
+  await openMaster(next.container)
+  expect(ready.ctx.uiWorkspace.openSession).toHaveBeenCalledExactlyOnceWith('master')
+  next.dispose()
 })
 
 it('polls one request at a time, keeps the data while new dependencies load, and polls less while hidden', async () => {
